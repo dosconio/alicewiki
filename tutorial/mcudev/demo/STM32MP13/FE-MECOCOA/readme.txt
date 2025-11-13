@@ -1,0 +1,1 @@
+[boot] from SDCard

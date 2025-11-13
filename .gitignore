@@ -1,0 +1,49 @@
+0Z-*
+atk_*
+*Debug.*
+
+# vs
+.vs
+
+# keil
+RTE/
+RTE_*
+Objects/
+Listings/
+DebugConfig/
+*.uvguix.*
+*Keil.BAT
+EventRecorderStub.scvd
+
+bin/
+*.bin
+obj/
+.obj/
+*.obj
+.lst/
+*.map
+*.dll
+*.zip
+*.pyd
+*.pyd
+*.msi
+*.a
+*.lib
+*.LIB
+*.7z
+target/
+build/
+Debug
+*Debug.cfg
+
+# CubeIDE
+*.prefs
+Stm32ImageAddHeader.exe
+Result
+
+# Rust
+Cargo.lock
+
+# vscode
+settings.json
+

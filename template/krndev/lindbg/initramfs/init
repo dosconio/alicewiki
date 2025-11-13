@@ -1,0 +1,14 @@
+#!/bin/busybox sh
+
+/bin/busybox mkdir -p /proc && /bin/busybox mount -t proc none /proc
+/bin/busybox echo "Ciallo Linux"
+
+export PS1="(KNEL)>>"
+
+/bin/busybox mknod /dev/ttyS0 c 4 64
+#/bin/busybox rm -f /dev/console
+#/bin/busybox mknod -m 600 tty1 c 4 1
+#/bin/busybox ln -s /dev/tty1 /dev/console
+#/bin/busybox ln -s /dev/ttyS0 /dev/console
+#/bin/busybox echo "ttyS0::askfirst:/bin/sh" > /etc/inittab
+/bin/busybox sh

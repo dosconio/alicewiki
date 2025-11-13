@@ -1,0 +1,23 @@
+{
+    "configurations": [
+        {
+            "name": "STM32",
+            "includePath": [
+                "${uincpath}",
+				"../../"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_UNICODE",
+				"_MPU_STM32MP13",
+				"_STYLE_RUST"
+            ],
+            "compilerPath": "arm-none-eabi-g++",
+            "cStandard": "c17",
+            "cppStandard": "gnu++17",
+            "intelliSenseMode": "gcc-arm"
+        }
+    ],
+    "version": 4
+}

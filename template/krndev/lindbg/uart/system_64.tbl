@@ -1,0 +1,2 @@
+452 common  get_cpu_number  sys_get_cpu_number
+453 common  my_uart_send    sys_my_uart_send

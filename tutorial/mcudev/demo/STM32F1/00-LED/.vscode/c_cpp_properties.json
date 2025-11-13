@@ -1,0 +1,21 @@
+{
+    "configurations": [
+        {
+            "name": "STM32F1",
+            "includePath": [
+                "${workspaceFolder}/**",
+				"${uincpath}"
+            ],
+            "defines": [
+                "_MCU_STM32F1x",
+                "UNICODE",
+                "_UNICODE"
+            ],
+            "compilerPath": "arm-none-eabi-g++",
+            "cStandard": "c17",
+            "cppStandard": "gnu++17",
+            "intelliSenseMode": "windows-gcc-x64"
+        }
+    ],
+    "version": 4
+}

@@ -1,0 +1,24 @@
+{
+	// Use IntelliSense to learn about possible attributes.
+	// Hover to view descriptions of existing attributes.
+	// For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"type": "cppdbg",
+			"request": "launch",
+			"name": "Mecocoa Lindbg",
+			"miDebuggerServerAddress": "127.0.0.1:9000",
+			"program": "${workspaceFolder}/vmlinux",
+			"args": [],
+			"stopAtEntry": false,
+			"cwd": "${workspaceFolder}",
+			"environment": [],
+			"externalConsole": false,
+			"logging": {
+				"engineLogging": false
+			},
+			"MIMode": "gdb"
+		}
+	]
+}
