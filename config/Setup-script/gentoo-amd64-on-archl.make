@@ -161,7 +161,7 @@ mount_first:
 # NAME        MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
 # nvme0n1     259:0    0 953.9G  0 disk
 # ├─nvme0n1p1 259:1    0    14M  0 part
-# ├─nvme0n1p2 259:2    0     1G  0 part /mnt/gentoo/efi
+# ├─nvme0n1p2 259:2    0     1G  0 part /mnt/gentoo/efi --(TODO)-> /mnt/gentoo/boot/efi
 # │                                     /boot
 # ├─nvme0n1p3 259:3    0    32G  0 part [SWAP]
 # ├─nvme0n1p4 259:4    0   256G  0 part /home

@@ -1,0 +1,42 @@
+#!/sbin/openrc-run
+
+# by dosconio
+
+name="SDDM Display Manager"
+description="Simple Desktop Display Manager"
+command="/usr/bin/sddm"
+command_background=true
+pidfile="/run/sddm.pid"
+command_user="root"
+
+depend() {
+    need dbus
+    need elogind
+    after bootmisc
+    after consolekit
+}
+
+start_pre() {
+    checkpath --directory --mode 0755 --owner sddm:sddm /var/lib/sddm
+    checkpath --directory --mode 0755 --owner sddm:sddm /var/lib/sddm/state
+    checkpath --directory --mode 0755 /run/sddm
+}
+
+start() {
+    ebegin "Starting ${name}"
+    start-stop-daemon --start \
+        --exec ${command} \
+        --pidfile ${pidfile} \
+        --user ${command_user} \
+        --make-pidfile \
+        --background
+    eend $?
+}
+
+stop() {
+    ebegin "Stopping ${name}"
+    start-stop-daemon --stop \
+        --exec ${command} \
+        --pidfile ${pidfile}
+    eend $?
+}
