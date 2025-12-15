@@ -24,6 +24,7 @@ setup-basic:
 	systemctl disable wpa_supplicant
 	systemctl enable iwd
 	#	# nano /etc/NetworkManager/NetworkManager.conf，在 [device] 下添加 wifi.backend=iwd。
+	#	# add DNS again
 	emerge --ask net-misc/dhcpcd
 	# config
 	emerge --ask fastfetch
@@ -62,6 +63,7 @@ setup_host: # under archlinux host, `su -`
 	# filesys and bootsys
 	genfstab -U /mnt/gentoo > /mnt/gentoo/etc/fstab # arch-install-scripts
 	grub-mkconfig -o /boot/grub/grub.cfg
+	#{TODO} update DNS
 
 setup_chroot: # after chroot (here should exist make)
 	source /etc/profile
@@ -133,7 +135,7 @@ mount_again:
 	sudo mount --make-rslave /mnt/gentoo/sys
 	sudo mount --make-rslave /mnt/gentoo/dev
 	sudo mount --make-rslave /mnt/gentoo/run
-	sudo chroot /mnt/gentoo /bin/bash 
+	sudo chroot /mnt/gentoo /bin/bash
 	sudo umount -l /mnt/gentoo/dev{/shm,/pts,}
 	sudo umount -R /mnt/gentoo
 
