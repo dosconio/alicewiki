@@ -1,6 +1,6 @@
 
 #ifndef BOARD_DETAIL
-#warning Recommand define BOARD_DETAIL and do init_specific
+#warning Recommend define BOARD_DETAIL and do init_specific
 #endif
 
 #include <cpp/Device/_Video.hpp>

@@ -1,6 +1,15 @@
 // ASCII CPP TAB4 CRLF
 // @dosconio 2024
 
+/*
+#Opt Id		Name	Type	IP		Offset		Binary
+P	0x1	fsbl-openbl	Binary	none	0x0			STM32PRGFW_UTIL_MP13xx_CP_Serial_Boot.stm32
+P	0x3	fsbl-extfl	Binary	none	0x0			SD_Ext_Loader.bin
+P	0x4	fsbl-app	Binary	mmc0	0x0000000	FSBLA_Sdmmc1_A7_Signed.bin
+P	0x5	fsbl-app	Binary	mmc0	0x0000080	FF_ALL.stm32
+P	0x6	fsbl-app	Binary	mmc0	0x0000500	mk.bat
+ * */
+
 #define BOARD_DETAIL "5DAE7" // STM32MP135-DAE7
 #include <cpp/MCU/ST/STM32MP13>
 #include <cpp/string>
@@ -75,11 +84,13 @@ extern "C" int  outsfmt0(const char* fmt, ...) {
 	uint32 a = para_next(args, uint32);
 	uint32 b = para_next(args, uint32);
 	VConsole.OutFormat(fmt, a, b);
+	return 0;
 }
 
 extern "C" {
 extern uint32_t* Buffer0;
 }
+uint32 aaa[512*2*2/4];
 
 fn main() -> int {
 	if (!init()) loop;
@@ -87,35 +98,30 @@ fn main() -> int {
 	//GPIOI[0].enInterrupt();
 	Circle circ(Point(200,200), 200);
 	Rectangle scrn_rect(Point(0, 0), Size2(800, 480), Color::AliceBlue);
-	LCD.Draw(scrn_rect);
-	VConsole.OutFormat("Ciallo %[32H]", 0x4567);
+//	LCD.Draw(scrn_rect);
+	LTDC[1].DrawRectangle(scrn_rect);
+//	VConsole.OutFormat("Ciallo %[32H]", 0x4567);
 
-	{
+	Buffer0 = (uint32_t*)aaa;
+	SDCard1.Read(0x500, Buffer0);
+	outsfmt0(" --- ", 0, 0);
+	for(int i=0; i< 16; i++) outsfmt0(" {%x}", *((char*)Buffer0 + i), 0);
+	outsfmt0(" - ", 0, 0);
+	for0(i,512) *((char*)Buffer0 + 512 + i) = i;
+	SDCard1.Write(0x500, (char*)Buffer0 + 512);
+	SDCard1.Read(0x500, Buffer0);
+	outsfmt0(" --- ", 0, 0);
+	for(int i=0; i< 64; i++) outsfmt0(" {%x}", *((char*)Buffer0 + i), 0);
 
-		SDCard1.Read(0x500, Buffer0);
-		SDCard1.Read(0x501, (char*)Buffer0 + 512);
-		outsfmt0(" --- ", 0, 0);
-		for(int i=0; i< 16; i++) outsfmt0(" {%x}", *((char*)Buffer0 + i), 0);
-		outsfmt0(" - ", 0, 0);
-		for(int i=512; i< 520; i++) outsfmt0(" {%x}", *((char*)Buffer0 + i), 0);
-		// write blk1 and then read to blk0
-		for0(i,512) *((char*)Buffer0 + 512 + i) = i;
-		SDCard1.Write(0x666, (char*)Buffer0 + 512);
-		SDCard1.Read(0x666, Buffer0);
-		outsfmt0(" --- ", 0, 0);
-		for(int i=0; i< 512; i++) outsfmt0(" {%x}", *((char*)Buffer0 + i), 0);
-	}
 	loop {
-		static unsigned k = 10;
 		LED.Toggle();
 		SysDelay(250);
 	}
 }
 
 // Global Data
-VideoControlBlock LCD = LTDC[1].getControlBlock();
-VideoConsole VConsole(LTDC[1], Size2(80, 25));
+VideoConsole VConsole(&LTDC[1], Rectangle(Point(0, 0), Size2(800,480)));
 
 void LTDC_LAYER_t::DrawFont(const Point& disp, const DisplayFont& font) const {}
 void outtxt(const char* str, stduint len) {str; len;}
-extern "C" { void erro(void) { loop{ LED.Toggle(); SysDelay(2000); } } }
+void erro(char*) { loop{ LED.Toggle(); SysDelay(2000); } }

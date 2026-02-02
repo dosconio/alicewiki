@@ -24,7 +24,7 @@ case "$(uname -s)" in
    *)
       #line for window executeable
       echo Postbuild with windows executable
-      imgtool="Amd64-Stm32ImageAddHeader"
+      imgtool="Stm32ImageAddHeader"
       cmd=""
       ;;
 esac

@@ -4,8 +4,6 @@
 using namespace uni;
 extern bool useDDR;
 
-_ESYM_C void erro();
-
 static bool init_clock_no_ddr() {
 	using namespace RCCReg;
 	RCC.canMode();
@@ -72,5 +70,5 @@ bool init_clock(void) {
 	return true;
 }
 
-extern "C" { void erro(void) { loop; } }
+void erro(char*) { loop; }
 extern "C" { void Error_Handler(void) { erro(); } }

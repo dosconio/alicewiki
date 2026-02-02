@@ -4,8 +4,6 @@
 using namespace uni;
 extern bool useDDR;
 
-_ESYM_C void erro();
-
 bool init_ddr() {
 	RCC.CSI.enAble(true);
 	RCC.enSyscfg(true);
