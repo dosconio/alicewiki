@@ -1,5 +1,6 @@
 #define _DEBUG
 #include <cpp/MCU/ST/STM32H7>
+#include <c/proctrl/ARM.h>
 extern "C" char _IDN_BOARD[16] {"STM32H743IIT6"};
 
 using namespace uni;
@@ -25,10 +26,10 @@ int main() {
 	KEYU.setMode(GPIORupt::Anyedge);
 	KEYU.setInterrupt(hand);
 	KEYU.enInterrupt();
-	while (true);
+	while (true) HALT();
 }
 
-void erro(char* str) {
+void erro(const char* str) {
 	LEDR.setMode(GPIOMode::OUT);
 	while (true) {
 		LEDR.Toggle();

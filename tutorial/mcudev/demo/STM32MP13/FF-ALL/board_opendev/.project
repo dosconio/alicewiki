@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <projectDescription>
-	<name>FF_ALL</name>
+	<name>LOADER</name>
 	<comment></comment>
 	<projects>
 	</projects>
@@ -38,9 +38,9 @@
 			<locationURI>PARENT-7-PROJECT_LOC/mecocoa/prehost/stm32mp13X-ac7/stm32mp13X-ac7.cpp</locationURI>
 		</link>
 		<link>
-			<name>Unilib/libSTM32MP13.a</name>
+			<name>Source/stm32mp13X-ac7.loader.S</name>
 			<type>1</type>
-			<location>E:/_bin/libSTM32MP13.a</location>
+			<locationURI>PARENT-7-PROJECT_LOC/mecocoa/prehost/stm32mp13X-ac7/stm32mp13X-ac7.loader.S</locationURI>
 		</link>
 	</linkedResources>
 </projectDescription>

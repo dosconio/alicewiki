@@ -14,15 +14,13 @@ GPIN& KEYR = GPIOH[ 3];//Right
 
 char _buf[16 + 1]; String buf(_buf, byteof(_buf) - 1);
 
-extern "C" {
 char* StrHeap(const char* valit_str){return (char*)valit_str;}
 char* StrHeapAppendChars(char* dest, char chr, size_t n){return dest + n + chr;}
 char* salc(size_t size){return 0;}
 void outtxt(const char* str, stduint len) {XART1.out(str, len);}
-}
 
 void hand_xart1() {
-	// while (!XART1.isReady());
+	LEDR.Toggle();
 	stduint timeout = 0x1FFFF;
 	if (buf[0] == '\r') XART1.ClearBuffer();
 	if (buf[XART1.getBufferPointer() - 1] == '\n') {
@@ -64,7 +62,7 @@ int main() {
 	}
 }
 
-void erro(char* str) {
+void erro(const char* str) {
 	LEDR.setMode(GPIOMode::OUT);
 	while (true) {
 		LEDR.Toggle();

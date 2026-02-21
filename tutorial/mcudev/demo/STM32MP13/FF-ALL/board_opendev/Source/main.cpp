@@ -5,8 +5,8 @@
 #Opt Id		Name	Type	IP		Offset		Binary
 P	0x1	fsbl-openbl	Binary	none	0x0			STM32PRGFW_UTIL_MP13xx_CP_Serial_Boot.stm32
 P	0x3	fsbl-extfl	Binary	none	0x0			SD_Ext_Loader.bin
-P	0x4	fsbl-app	Binary	mmc0	0x0000000	FSBLA_Sdmmc1_A7_Signed.bin
-P	0x5	fsbl-app	Binary	mmc0	0x0000080	FF_ALL.stm32
+P	0x4	fsbl-app	Binary	mmc0	0x0000080	FF_ALL.stm32
+P	0x5	fsbl-app	Binary	mmc0	0x0000500	FF_ALL.stm32
 P	0x6	fsbl-app	Binary	mmc0	0x0000500	mk.bat
  * */
 
@@ -87,10 +87,8 @@ extern "C" int  outsfmt0(const char* fmt, ...) {
 	return 0;
 }
 
-extern "C" {
-extern uint32_t* Buffer0;
-}
-uint32 aaa[512*2*2/4];
+
+uint32 Buffer0[512*2*2/4];
 
 fn main() -> int {
 	if (!init()) loop;
@@ -102,14 +100,13 @@ fn main() -> int {
 	LTDC[1].DrawRectangle(scrn_rect);
 //	VConsole.OutFormat("Ciallo %[32H]", 0x4567);
 
-	Buffer0 = (uint32_t*)aaa;
-	SDCard1.Read(0x500, Buffer0);
+	SDCard1.Read(0x400, Buffer0);
 	outsfmt0(" --- ", 0, 0);
 	for(int i=0; i< 16; i++) outsfmt0(" {%x}", *((char*)Buffer0 + i), 0);
 	outsfmt0(" - ", 0, 0);
 	for0(i,512) *((char*)Buffer0 + 512 + i) = i;
-	SDCard1.Write(0x500, (char*)Buffer0 + 512);
-	SDCard1.Read(0x500, Buffer0);
+	SDCard1.Write(0x400, (char*)Buffer0 + 512);
+	SDCard1.Read(0x400, Buffer0);
 	outsfmt0(" --- ", 0, 0);
 	for(int i=0; i< 64; i++) outsfmt0(" {%x}", *((char*)Buffer0 + i), 0);
 

@@ -17,3 +17,5 @@ int main() {
 		for(volatile unsigned i{0}; i < 1000000; i++){}
 	}
 }
+
+void erro(const char* erromsg){ }

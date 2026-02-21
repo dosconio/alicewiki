@@ -16,13 +16,12 @@ int main() {
 	LEDB.setMode(GPIOMode::OUT) = !false;
 	LEDR.setMode(GPIOMode::OUT) = !false;
 	while (true) {
-		LEDR.Toggle();
 		LEDB.Toggle();
 		SysDelay_ms(1000);
 	}
 }
 
-void erro(char* str) {
+void erro(const char* str) {
 	LEDR.setMode(GPIOMode::OUT);
 	while (true) {
 		LEDR.Toggle();

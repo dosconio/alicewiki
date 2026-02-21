@@ -30,7 +30,7 @@ int main() {
 	}
 }
 
-void erro(char* str) {
+void erro(const char* str) {
 	LEDR.setMode(GPIOMode::OUT);
 	while (true) {
 		LEDR.Toggle();
