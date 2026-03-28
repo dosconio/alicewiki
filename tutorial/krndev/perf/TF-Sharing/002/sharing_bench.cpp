@@ -15,78 +15,76 @@ struct alignas(64) TrueSharing {
     volatile long shared_val;
 };
 
-// 3. 无共享结构体 (作为对照组)
+// 3. 无共享结构体
 struct alignas(64) NoSharing {
     alignas(64) volatile long a;
     alignas(64) volatile long b;
 };
 
-// 全局实例
-LargeFalseSharing lfs_data;
-TrueSharing ts_data;
-NoSharing ns_data;
+// ======== 全局实例 (BSS段) ========
+LargeFalseSharing global_lfs;
+TrueSharing global_ts;
 
-// ======== 工作函数 ========
-// 伪共享组：访问 112~119 字节 和 120~127 字节 (处于同一个 Cacheline)
-void work_lfs_1() { for (size_t i = 0; i < ITERATIONS; ++i) lfs_data.t1_data[14]++; }
-void work_lfs_2() { for (size_t i = 0; i < ITERATIONS; ++i) lfs_data.t2_data[0]++; }
+// ======== 工作函数 (支持指针传入，实现复用) ========
+void work_lfs_1(LargeFalseSharing* ptr) { for (size_t i = 0; i < ITERATIONS; ++i) ptr->t1_data[14]++; }
+void work_lfs_2(LargeFalseSharing* ptr) { for (size_t i = 0; i < ITERATIONS; ++i) ptr->t2_data[0]++; }
 
-// 真共享组：死磕同一个变量
-void work_ts() { for (size_t i = 0; i < ITERATIONS; ++i) ts_data.shared_val++; }
-
-// 无共享组：互不干扰
-void work_ns_a() { for (size_t i = 0; i < ITERATIONS; ++i) ns_data.a++; }
-void work_ns_b() { for (size_t i = 0; i < ITERATIONS; ++i) ns_data.b++; }
+void work_ts(TrueSharing* ptr) { for (size_t i = 0; i < ITERATIONS; ++i) ptr->shared_val++; }
 
 int main() {
-    std::cout << "🔥 开启全并发压力测试 (6 个线程同时运行)..." << std::endl;
+    std::cout << "🔥 开启全并发压力测试 (Global, Stack, Heap 同时轰炸)..." << std::endl;
+    
+    // ======== 栈实例 (Stack) ========
+    // 只要 main 函数不退，这些栈变量的生命周期就一直存在，传指针给子线程是安全的
+    LargeFalseSharing stack_lfs;
+    TrueSharing stack_ts;
+
+    // ======== 堆实例 (Heap) ========
+    LargeFalseSharing* heap_lfs = new LargeFalseSharing();
+    TrueSharing* heap_ts = new TrueSharing();
+
     std::vector<std::thread> threads;
 
-    // 1. 注入伪共享噪音
-    threads.emplace_back(work_lfs_1);
-    threads.emplace_back(work_lfs_2);
+    // 1. 注入 [全局区] 噪音
+    threads.emplace_back(work_lfs_1, &global_lfs);
+    threads.emplace_back(work_lfs_2, &global_lfs);
+    threads.emplace_back(work_ts, &global_ts);
+    threads.emplace_back(work_ts, &global_ts);
 
-    // 2. 注入真共享噪音
-    threads.emplace_back(work_ts);
-    threads.emplace_back(work_ts);
+    // 2. 注入 [栈区] 噪音
+    threads.emplace_back(work_lfs_1, &stack_lfs);
+    threads.emplace_back(work_lfs_2, &stack_lfs);
+    threads.emplace_back(work_ts, &stack_ts);
+    threads.emplace_back(work_ts, &stack_ts);
 
-    // 3. 注入对照组噪音
-    threads.emplace_back(work_ns_a);
-    threads.emplace_back(work_ns_b);
+    // 3. 注入 [堆区] 噪音
+    threads.emplace_back(work_lfs_1, heap_lfs);
+    threads.emplace_back(work_lfs_2, heap_lfs);
+    threads.emplace_back(work_ts, heap_ts);
+    threads.emplace_back(work_ts, heap_ts);
 
     for (auto& t : threads) {
         t.join();
     }
     
+    delete heap_lfs;
+    delete heap_ts;
     std::cout << "✅ 测试完成." << std::endl;
     return 0;
 }
 /*
 g++ -g -O2 -pthread sharing_bench.cpp -o sharing_bench -static
+sudo /home/neu/exp/perfparse/target/debug/perfparse ./sharing_bench
 
-neu@dn:~/exp$ sudo /home/neu/exp/perfparse/target/debug/perfparse ./sharing_bench
-🚀 目标程序: /home/neu/exp/sharing_bench
-📂 工作目录: /home/neu/exp
-
-▶️  [1/4] 正在执行 sudo perf c2c record... (请耐心等待程序运行结束)
-🔥 开启全并发压力测试 (6 个线程同时运行)...
-✅ 测试完成.
-[ perf record: Woken up 22 times to write data ]
-[ perf record: Captured and wrote 7.097 MB perf.data (84339 samples) ]
-▶️  [2/4] 正在执行 sudo perf script 导出数据...
-▶️  [3/4] 修改 perf.txt 权限...
-▶️  [4/4] 正在调用 nm 分析 ELF 符号表...
-✅ 成功加载 7528 个符号，动态边界 [_end]: 0x5e67f8
-
-📥 开始读取并解析日志数据...
-🔍 成功加载 26586 条精确访问记录，开始统计分析...
-
-==================================================================
-🚨 静态数据区 真/伪共享 最终诊断报告 (Max Addr <= 0x5e67f8)
-==================================================================
-💥 伪共享 (False Sharing) [争用变量]: lfs_data+0x70 与 lfs_data+0x78 | 间距: 08 字节 | 跨核 Ping-Pong: 9043 次
-🔴 真共享 (True Sharing) [争用变量]: ts_data 与 ts_data | 间距: 00 字节 | 跨核 Ping-Pong: 8937 次
-==================================================================
-neu@dn:~/exp$ sudo /home/neu/exp/perfparse/target/debug/perfparse ./sharing_bench
+T,S,0x7ffd3a59c300,9101
+T,B,global_ts,9042
+T,A,0x9aaf00,8979
+F,B,global_lfs+0x70<->global_lfs+0x78,8488
+F,A,0x9aae30<->0x9aae38,8454
+F,S,0x7ffd3a59c3b0<->0x7ffd3a59c3b8,7862
+T,A,0xfeb81008,1299
+T,A,0xfeb87000,987
+T,S,0x7ffd3a59c3b0,887
+...
 
 */
