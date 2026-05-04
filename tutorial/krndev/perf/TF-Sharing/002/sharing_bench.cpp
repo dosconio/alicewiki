@@ -26,10 +26,19 @@ LargeFalseSharing global_lfs;
 TrueSharing global_ts;
 
 // ======== 工作函数 (支持指针传入，实现复用) ========
-void work_lfs_1(LargeFalseSharing* ptr) { for (size_t i = 0; i < ITERATIONS; ++i) ptr->t1_data[14]++; }
-void work_lfs_2(LargeFalseSharing* ptr) { for (size_t i = 0; i < ITERATIONS; ++i) ptr->t2_data[0]++; }
+void work_lfs_1(LargeFalseSharing* ptr) { 
+	for (size_t i = 0; i < ITERATIONS; ++i) 
+		ptr->t1_data[14]++; 
+}
+void work_lfs_2(LargeFalseSharing* ptr) {
+	for (size_t i = 0; i < ITERATIONS; ++i) 
+		ptr->t2_data[0]++; 
+}
 
-void work_ts(TrueSharing* ptr) { for (size_t i = 0; i < ITERATIONS; ++i) ptr->shared_val++; }
+void work_ts(TrueSharing* ptr) {
+	for (size_t i = 0; i < ITERATIONS; ++i)
+		ptr->shared_val++;
+}
 
 int main() {
     std::cout << "🔥 开启全并发压力测试 (Global, Stack, Heap 同时轰炸)..." << std::endl;
@@ -73,18 +82,9 @@ int main() {
     return 0;
 }
 /*
-g++ -g -O2 -pthread sharing_bench.cpp -o sharing_bench -static
-sudo /home/neu/exp/perfparse/target/debug/perfparse ./sharing_bench
 
-T,S,0x7ffd3a59c300,9101
-T,B,global_ts,9042
-T,A,0x9aaf00,8979
-F,B,global_lfs+0x70<->global_lfs+0x78,8488
-F,A,0x9aae30<->0x9aae38,8454
-F,S,0x7ffd3a59c3b0<->0x7ffd3a59c3b8,7862
-T,A,0xfeb81008,1299
-T,A,0xfeb87000,987
-T,S,0x7ffd3a59c3b0,887
-...
+g++ -g -O0 -pthread sharing_bench.cpp -o sharing_bench -static
 
+sudo /home/neu/exp/perfparse/target/debug/perfparse      ./sharing_bench
+sudo /home/neu/exp/perfparse_a/target/debug/perfparse_a  ./sharing_bench
 */

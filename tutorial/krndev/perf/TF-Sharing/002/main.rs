@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet}; // 【新增】：引入 HashSet 用于去重收集 RIP
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, Write};
@@ -9,6 +9,7 @@ use std::process::Command;
 struct Event {
     cpu: u32,
     addr: u64,
+    rip: String,
 }
 
 fn main() {
@@ -26,7 +27,6 @@ fn main() {
         .expect("❌ 找不到指定的二进制文件，请检查路径！");
     let work_dir = binary_path.parent().unwrap_or(Path::new("."));
     
-    // 输入输出文件路径
     let perf_txt_path = work_dir.join("perf.txt");
     let hitm_txt_path = work_dir.join("hitm.txt");
 
@@ -36,7 +36,8 @@ fn main() {
     println!("\n▶️  [1/4] 正在执行 sudo perf c2c record... (请耐心等待)");
     let mut perf_cmd = Command::new("sudo");
     perf_cmd.current_dir(work_dir)
-        .arg("perf").arg("c2c").arg("record").arg("--")
+        .arg("perf").arg("c2c").arg("record")//.arg("-g")
+        .arg("--")
         .arg(binary_path.to_str().unwrap())
         .args(target_args);
 
@@ -75,7 +76,6 @@ fn main() {
             if !line.contains(binary_name) { continue; }
 
             if let Some(event) = parse_line(&line) {
-                // 【核心噪音过滤】：屏蔽掉大于 0x7fffffffffff 的内核态和特殊映射地址
                 if event.addr > 0x10000 && event.addr < 0x7fffffffffff {
                     events.push(event);
                 }
@@ -86,7 +86,8 @@ fn main() {
         return;
     }
 
-    let mut pair_counts: HashMap<(u64, u64), usize> = HashMap::new();
+    // 【核心升级】：Value 由单纯的 usize 次数，升级为 (次数, RIP集合)
+    let mut pair_counts: HashMap<(u64, u64), (usize, HashSet<String>)> = HashMap::new();
 
     for i in 0..events.len() {
         let current_event = &events[i];
@@ -97,41 +98,52 @@ fn main() {
                 if distance < 64 {
                     let min_addr = std::cmp::min(current_event.addr, prev_event.addr);
                     let max_addr = std::cmp::max(current_event.addr, prev_event.addr);
-                    *pair_counts.entry((min_addr, max_addr)).or_insert(0) += 1;
+                    
+                    let entry = pair_counts.entry((min_addr, max_addr)).or_insert((0, HashSet::new()));
+                    entry.0 += 1; // 增加次数
+                    entry.1.insert(current_event.rip.clone()); // 记录受害者的 RIP
+                    entry.1.insert(prev_event.rip.clone());    // 记录肇事者的 RIP
+                    
                     break;
                 }
             }
         }
     }
 
-    // 排序：次数从高到低
+    // 排序：按发生次数 (b.1.0) 从高到低
     let mut sorted_results: Vec<_> = pair_counts.into_iter().collect();
-    sorted_results.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted_results.sort_by(|a, b| b.1.0.cmp(&a.1.0));
 
-    // 构造结构化输出行
     let mut output_lines = Vec::new();
-    for ((addr1, addr2), count) in sorted_results {
+    for ((addr1, addr2), (count, rips)) in sorted_results {
         let distance = addr2 - addr1;
-        
-        // 1. 判定 T/F
         let tf = if distance == 0 { 'T' } else { 'F' };
-        
-        // 2. 判定位置和格式化地址
         let (region1, str1) = categorize_addr(addr1, end_addr, &symbols);
         
         let final_addr_str = if distance == 0 {
-            str1 // 真共享只打印一个地址即可
+            str1 
         } else {
             let (_, str2) = categorize_addr(addr2, end_addr, &symbols);
-            format!("{}<->{}", str1, str2) // 伪共享打印争用的两个地址
+            format!("{}<->{}", str1, str2) 
         };
 
-        // 3. 拼接单行 CSV 格式：[T/F],[A/S/B],[Address],[Count]
-        let line = format!("{},{},{},{}", tf, region1, final_addr_str, count);
+        // 基础格式：[T/F],[A/S/B],[Address],[Count]
+        let mut line = format!("{},{},{},{}", tf, region1, final_addr_str, count);
+
+        // 【新增需求】：如果 region 是 'A' (Heap)，则在末尾附加上 RIP
+        if region1 == 'A' {
+            // 将 HashSet 转化为 Vec 并排序，保证输出顺序稳定美观
+            let mut rip_vec: Vec<String> = rips.into_iter().collect();
+            rip_vec.sort();
+            
+            // 拼接所有的 RIP，并统一加上 "0x" 前缀
+            let rip_str = rip_vec.iter().map(|r| format!("0x{}", r)).collect::<Vec<_>>().join(",");
+            line = format!("{}: {}", line, rip_str);
+        }
+
         output_lines.push(line);
     }
 
-    // 写入 hitm.txt
     let mut out_file = File::create(&hitm_txt_path).expect("❌ 无法创建 hitm.txt");
     for line in &output_lines {
         writeln!(out_file, "{}", line).unwrap();
@@ -140,26 +152,21 @@ fn main() {
     println!("\n✅ 分析完成！全量诊断数据已导出至: {}", hitm_txt_path.display());
     println!("--------------------------------------------------");
     println!("📄 hitm.txt 头部预览 (Top 10):");
-    println!("格式: [T/F Sharing],[位置 A(Heap)/S(Stack)/B(Static)],[十六进制地址/符号],[次数]");
+    println!("格式: [T/F],[A/S/B],[地址/符号],[次数][: 触发指令RIP (仅Heap)]");
     println!("--------------------------------------------------");
     
-    // 输出前十行到控制台
     for line in output_lines.iter().take(10) {
         println!("{}", line);
     }
     println!("--------------------------------------------------");
 }
 
-// 【新增】：根据内存布局划分区域，并提取符号
 fn categorize_addr(addr: u64, end_addr: u64, symbols: &[(u64, String)]) -> (char, String) {
     if addr <= end_addr {
-        // B: Static (BSS/Data)
         ('B', resolve_symbol(addr, symbols))
     } else if addr > 0x700000000000 {
-        // S: Stack / MMAP
         ('S', format!("0x{:x}", addr))
     } else {
-        // A: Heap (Allocated)
         ('A', format!("0x{:x}", addr))
     }
 }
@@ -196,6 +203,7 @@ fn get_symbols_and_end(binary_path: &str) -> Option<(Vec<(u64, String)>, u64)> {
 
 fn parse_line(line: &str) -> Option<Event> {
     if !line.contains("|OP STORE|") && !line.contains("|OP LOAD|") { return None; }
+    
     let cpu_start = line.find('[')? + 1;
     let cpu_end = line.find(']')?;
     let cpu: u32 = line[cpu_start..cpu_end].parse().ok()?;
@@ -204,9 +212,19 @@ fn parse_line(line: &str) -> Option<Event> {
     let before_pipe = after_p.split('|').next()?;
     let addr_str = before_pipe.split_whitespace().next()?;
     let addr = u64::from_str_radix(addr_str, 16).unwrap_or(0);
+
+    // 【新增】：提取 RIP
+    // 在 perf script 的典型输出中，`|BLK  N/A` 之后的部分就是 RIP 和 符号名
+    // 通过 rsplit 截取最后一个管道符之后的内容，第三个分词通常就是精确的 16 进制 RIP
+    let after_last_pipe = line.rsplit('|').next()?;
+    let tail_parts: Vec<&str> = after_last_pipe.split_whitespace().collect();
+    let rip = if tail_parts.len() > 2 {
+        tail_parts[2].to_string()
+    } else {
+        "unknown".to_string()
+    };
     
-    // 移除了用不到的 raw_line 和 level 字段，极大降低内存占用
-    Some(Event { cpu, addr })
+    Some(Event { cpu, addr, rip })
 }
 
 fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>> where P: AsRef<Path> {

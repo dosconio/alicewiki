@@ -1,0 +1,122 @@
+
+use std::collections::HashMap;
+use std::env;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::path::Path;
+use std::process::Command;
+
+/// 调用 addr2line 将 IP 地址转换为 "文件名!行号" 格式
+fn resolve_ip(ip: &str, binary: &str, cache: &mut HashMap<String, String>) -> String {
+    // 1. 如果缓存中已经有这个 IP 的解析结果，直接返回
+    if let Some(resolved) = cache.get(ip) {
+        return resolved.clone();
+    }
+
+    // 2. 调用 addr2line -e <binary> <ip>
+    let output = Command::new("addr2line")
+        .arg("-e")
+        .arg(binary)
+        .arg(ip)
+        .output();
+
+    let resolved = match output {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stdout = stdout.trim(); // 移除末尾的换行符
+
+            // addr2line 无法解析时通常输出 "??:0" 或 "??:?"
+            if stdout == "??:0" || stdout == "??:?" {
+                format!("{}!?", ip) // 降级策略：保留原IP
+            } else if let Some((path_str, line_str)) = stdout.rsplit_once(':') {
+                // 提取纯文件名（去掉前面的路径）
+                let file_name = Path::new(path_str)
+                    .file_name()
+                    .map(|os_str| os_str.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path_str.to_string());
+
+				// (discriminator 3) 是 DWARF 调试信息中的一个术语，它是由 addr2line 工具输出的。它的出现主要是因为编译器优化。
+				let line_str = line_str.split_whitespace().next().unwrap_or(line_str);
+                
+                // 拼接为 "文件名!行号"
+                format!("{}!{}", file_name, line_str)
+            } else {
+                stdout.to_string()
+            }
+        }
+        _ => format!("{}!err", ip), // 进程调用失败时的降级
+    };
+
+    // 3. 将结果写入缓存
+    cache.insert(ip.to_string(), resolved.clone());
+    resolved
+}
+
+/// 处理单行文本
+fn process_line(line: &str, binary: &str, cache: &mut HashMap<String, String>) -> String {
+    // 只有 T,A 或 F,A 开头的行才包含我们需要处理的 IP 列表
+    if line.starts_with("T,A") || line.starts_with("F,A") {
+        // 以冒号为界限，拆分前面的事件信息和后面的 IP 列表
+        if let Some((prefix, ips_part)) = line.split_once(':') {
+            // 解析出所有的 IP 地址
+            let ips: Vec<&str> = ips_part.split(',').map(|s| s.trim()).collect();
+            let mut resolved_ips = Vec::new();
+            
+            for ip in ips {
+                if ip.is_empty() {
+                    continue;
+                }
+                let resolved = resolve_ip(ip, binary, cache);
+				// 核心修改：过滤掉后缀为 !? (没有行号)、!0 (无效行号) 或 !err (执行报错) 的结果
+                if !resolved.ends_with("!?") && !resolved.ends_with("!0") && !resolved.ends_with("!err") {
+                    resolved_ips.push(resolved);
+                }
+            }
+
+			// 排序、去重
+            resolved_ips.sort(); 
+            resolved_ips.dedup();
+            
+            // 重新拼接字符串，保持冒号和空格的格式
+            // return format!("{}: {}", prefix, resolved_ips.join(","));
+			if resolved_ips.is_empty() {
+                return prefix.to_string();
+            } else {
+                // 拼接去重后的简洁结果
+                return format!("{}: {}", prefix, resolved_ips.join(", "));
+            }
+        }
+    }
+    // 不符合条件的行原样返回
+    line.to_string()
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 获取命令行参数
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        eprintln!("用法: {} <带调试信息的二进制文件路径>", args[0]);
+        std::process::exit(1);
+    }
+    let binary_path = &args[1];
+
+    // 打开输入和输出文件
+    let input_file = File::open("hitm.txt").map_err(|e| format!("无法打开 hitm.txt: {}", e))?;
+    let reader = BufReader::new(input_file);
+
+    let output_file = File::create("hitm_a.txt").map_err(|e| format!("无法创建 hitm_a.txt: {}", e))?;
+    let mut writer = BufWriter::new(output_file);
+
+    // 初始化 IP 缓存
+    let mut cache: HashMap<String, String> = HashMap::new();
+
+    // 逐行读取、处理、写入
+    for line in reader.lines() {
+        let line = line?;
+        let processed_line = process_line(&line, binary_path, &mut cache);
+        writeln!(writer, "{}", processed_line)?;
+    }
+
+    println!("处理完成！共缓存了 {} 个独立的 IP 解析结果。输出已保存到 hitm_a.txt", cache.len());
+    Ok(())
+}

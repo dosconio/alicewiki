@@ -12,24 +12,31 @@ GPIN& KEYL = GPIOC[13];// Left
 GPIN& KEYD = GPIOH[ 2];// Down
 GPIN& KEYR = GPIOH[ 3];//Right
 
-char _buf[16 + 1]; String buf(_buf, byteof(_buf) - 1);
+char _buf[64]; String buf(_buf, byteof(_buf));
 
 char* StrHeap(const char* valit_str){return (char*)valit_str;}
 char* StrHeapAppendChars(char* dest, char chr, size_t n){return dest + n + chr;}
 char* salc(size_t size){return 0;}
 void outtxt(const char* str, stduint len) {XART1.out(str, len);}
 
+volatile bool rx_frame_ready = false;
 void hand_xart1() {
-	LEDR.Toggle();
-	stduint timeout = 0x1FFFF;
-	if (buf[0] == '\r') XART1.ClearBuffer();
-	if (buf[XART1.getBufferPointer() - 1] == '\n') {
-		//  assume \r\n
-		buf[XART1.getBufferPointer() - 1] = 0;
-		XART1.OutFormat("Hello, %s\n", buf.reference());
-		XART1.ClearBuffer();
+	stduint ptr = XART1.getBufferPointer();
+	if (ptr) if (_buf[ptr - 1] == '\n' || _buf[ptr - 1] == '\r') {
+		_buf[ptr - 1] = 0; // buf.Refresh();
+		rx_frame_ready = true;
 	}
-	if (XART1.isReady()) XART1.innByInterrupt();
+	if (ptr >= byteof(_buf)) {
+		_buf[ptr - 1];
+		rx_frame_ready = true;
+	}
+	//rx_frame_ready = true;
+	if (XART1.isReady()) {
+		XART1.innByInterrupt();
+	} else {
+		XART1.error = NULL;
+		XART1.innByInterrupt();
+	}
 }
 
 int main() {
@@ -54,7 +61,17 @@ int main() {
 	buf.Format("Ciallo~\n");
 	XART1.OutFormat(buf.reference());
 	XART1.OutFormat("Hello, %s %s\n", "Happy", "World");
-	
+	while (1) {
+		LEDB.Toggle();
+		//XART1.out("ciallo ", 7);
+		if (rx_frame_ready) {
+			XART1.OutFormat("Hello, %s\n", buf.reference());
+			XART1.ClearBuffer();
+			rx_frame_ready = false;
+			continue;
+        }
+		SysDelay_ms(250);
+	}
 	while (true) {
 		LEDB.Toggle();
 		//XART1.out("ciallo ", 7);
