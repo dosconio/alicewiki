@@ -15,7 +15,11 @@ struct Event {
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("❌ 用法: {} <二进制程序路径> [程序参数...]", args[0]);
+        eprintln!("❌ 用法:");
+        eprintln!("   1. 拉起新进程模式: {} <二进制程序路径> [程序参数...]", args[0]);
+        eprintln!("   2. 绑定现有进程模式: {} <二进制程序路径> -p <PID>", args[0]);
+        eprintln!("💡 示例: {} ./sharing_bench 10 1000", args[0]);
+        eprintln!("💡 示例: {} ./sharing_bench -p 12345", args[0]);
         return;
     }
 
@@ -27,23 +31,44 @@ fn main() {
         .expect("❌ 找不到指定的二进制文件，请检查路径！");
     let work_dir = binary_path.parent().unwrap_or(Path::new("."));
     
+    // 输入输出文件路径
     let perf_txt_path = work_dir.join("perf.txt");
     let hitm_txt_path = work_dir.join("hitm.txt");
 
     println!("🚀 目标程序: {}", binary_path.display());
     println!("📂 工作目录: {}", work_dir.display());
 
+    // 【新增】：解析是否处于 PID 绑定模式
+    let mut is_pid_mode = false;
+    let mut target_pid = String::new();
+
+    if target_args.len() >= 2 && target_args[0] == "-p" {
+        is_pid_mode = true;
+        target_pid = target_args[1].clone();
+    }
+
     println!("\n▶️  [1/4] 正在执行 sudo perf c2c record... (请耐心等待)");
     let mut perf_cmd = Command::new("sudo");
     perf_cmd.current_dir(work_dir)
-        .arg("perf").arg("c2c").arg("record")//.arg("-g")
-        .arg("--")
-        .arg(binary_path.to_str().unwrap())
-        .args(target_args);
+        .arg("perf").arg("c2c").arg("record");
 
+    // 【核心路由】：根据模式构造不同的 perf 启动参数
+    if is_pid_mode {
+        println!("🔗 模式: 绑定现有线上进程 PID [{}]", target_pid);
+        println!("⏳ 为了安全起见，将自动采样 10 秒钟后停止...");
+        perf_cmd.arg("-p").arg(&target_pid)
+                .arg("sleep").arg("10"); // 借用 sleep 10 控制 perf 采样时长
+    } else {
+        println!("🚀 模式: 自动拉起新进程运行...");
+        perf_cmd.arg("--")
+                .arg(binary_path.to_str().unwrap())
+                .args(target_args);
+    }
+
+    // 运行 perf
     let record_status = perf_cmd.status().expect("❌ 执行 perf c2c record 失败");
     if !record_status.success() {
-        eprintln!("❌ perf record 被中断或执行失败。");
+        eprintln!("❌ perf record 被中断或执行失败。请检查是否需要 root 权限，或 PID 是否存在。");
         return;
     }
 
@@ -76,6 +101,7 @@ fn main() {
             if !line.contains(binary_name) { continue; }
 
             if let Some(event) = parse_line(&line) {
+                // 【核心噪音过滤】：屏蔽掉大于 0x7fffffffffff 的内核态和特殊映射地址
                 if event.addr > 0x10000 && event.addr < 0x7fffffffffff {
                     events.push(event);
                 }
@@ -86,7 +112,6 @@ fn main() {
         return;
     }
 
-    // 【核心升级】：Value 由单纯的 usize 次数，升级为 (次数, RIP集合)
     let mut pair_counts: HashMap<(u64, u64), (usize, HashSet<String>)> = HashMap::new();
 
     for i in 0..events.len() {
@@ -127,16 +152,12 @@ fn main() {
             format!("{}<->{}", str1, str2) 
         };
 
-        // 基础格式：[T/F],[A/S/B],[Address],[Count]
         let mut line = format!("{},{},{},{}", tf, region1, final_addr_str, count);
 
-        // 【新增需求】：如果 region 是 'A' (Heap)，则在末尾附加上 RIP
+        // 如果 region 是 'A' (Heap)，则在末尾附加上 RIP
         if region1 == 'A' {
-            // 将 HashSet 转化为 Vec 并排序，保证输出顺序稳定美观
             let mut rip_vec: Vec<String> = rips.into_iter().collect();
             rip_vec.sort();
-            
-            // 拼接所有的 RIP，并统一加上 "0x" 前缀
             let rip_str = rip_vec.iter().map(|r| format!("0x{}", r)).collect::<Vec<_>>().join(",");
             line = format!("{}: {}", line, rip_str);
         }
