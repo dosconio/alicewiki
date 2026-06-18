@@ -114,7 +114,7 @@ fn main() {
 
     println!("▶️  [2/4] 正在执行 sudo perf script 导出数据...");
     let script_cmd = format!(
-        "sudo perf script -F ip,addr,sym,dso,cpu,event,data_src > {}",
+        "sudo perf script -F ip,addr,phys_addr,sym,dso,cpu,event,data_src > {}",
         perf_txt_path.display()
     );
     Command::new("sh").current_dir(work_dir).arg("-c").arg(&script_cmd)
@@ -453,11 +453,17 @@ fn get_element_size(type_str: &str, type_map: &HashMap<String, StructInfo>) -> O
 // ---------------------------------------------------------
 fn parse_line(line: &str) -> Option<Event> {
     if !line.contains("|OP STORE|") && !line.contains("|OP LOAD|") { return None; }
-    
+
+    // phys_addr 是行末最后一个字段，为 0 表示 addr 是物理地址而非虚拟地址
+    let phys_addr = line.split_whitespace().last()
+        .and_then(|s| u64::from_str_radix(s, 16).ok())
+        .unwrap_or(0);
+    if phys_addr == 0 { return None; }
+
     let cpu_start = line.find('[')? + 1;
     let cpu_end = line.find(']')?;
     let cpu: u32 = line[cpu_start..cpu_end].parse().ok()?;
-    
+
     let after_p = line.split("P:").nth(1)?;
     let before_pipe = after_p.split('|').next()?;
     let addr_str = before_pipe.split_whitespace().next()?;
@@ -465,12 +471,12 @@ fn parse_line(line: &str) -> Option<Event> {
 
     let after_last_pipe = line.rsplit('|').next()?;
     let tail_parts: Vec<&str> = after_last_pipe.split_whitespace().collect();
-    let rip = if tail_parts.len() > 2 {
+    let rip = if tail_parts.len() > 3 {
         tail_parts[2].to_string()
     } else {
         "unknown".to_string()
     };
-    
+
     Some(Event { cpu, addr, rip })
 }
 

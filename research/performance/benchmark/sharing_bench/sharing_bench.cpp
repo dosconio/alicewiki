@@ -82,6 +82,8 @@ int main() {
     return 0;
 }
 /*
+g++ -g -no-pie -fno-pic sharing_bench.cpp -o sharing_bench 
+g++ -g -static          sharing_bench.cpp -o sharing_bench 
 
 g++ -g -O0 -pthread sharing_bench.cpp -o sharing_bench -static
 
