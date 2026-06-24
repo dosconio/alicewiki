@@ -1,0 +1,25 @@
+[package]
+name = "fsparse_a"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "fsparse_a"
+path = "src/main.rs"
+
+[dependencies]
+fsparse_a-common = { workspace = true, features = ["user", "std"] }
+aya = "0.13"
+aya-log = "0.2"
+anyhow = "1.0"
+libc = "0.2"
+clap = { version = "4.5", features = ["derive"] }
+gimli = "0.31"
+object = "0.36"
+memmap2 = "0.9"
+typed-arena = "2.0"
+fallible-iterator = "0.3"
+
+[build-dependencies]
+# 不在 build 时编译 eBPF，由 xtask 统一构建后从 target 目录读取

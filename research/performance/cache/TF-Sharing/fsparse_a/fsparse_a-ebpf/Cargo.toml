@@ -1,0 +1,17 @@
+[package]
+name = "fsparse_a-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "fsparse_a-ebpf"
+path = "src/main.rs"
+
+[dependencies]
+fsparse_a-common = { workspace = true }
+aya-ebpf = "0.1"
+aya-ebpf-macros = "0.1"
+aya-log-ebpf = "0.1"
+
+[build-dependencies]
+which = "6.0"

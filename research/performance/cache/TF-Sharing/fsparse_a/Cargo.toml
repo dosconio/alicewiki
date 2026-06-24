@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["fsparse_a", "fsparse_a-common", "fsparse_a-ebpf", "xtask"]
+
+[workspace.dependencies]
+fsparse_a-common = { path = "fsparse_a-common" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+
+[profile.release.package.fsparse_a-ebpf]
+opt-level = 3
