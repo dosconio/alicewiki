@@ -2,7 +2,7 @@
 #![no_main]
 
 use aya_ebpf::{
-    helpers::gen::{bpf_get_stack, bpf_get_stackid, bpf_ktime_get_ns},
+    helpers::{bpf_probe_read_user, gen::{bpf_get_stack, bpf_get_stackid, bpf_ktime_get_ns}},
     macros::{map, uprobe, uretprobe},
     maps::{HashMap, PerCpuArray, RingBuf, StackTrace},
     programs::{ProbeContext, RetProbeContext},
@@ -269,6 +269,22 @@ pub fn uprobe_malloc_entry(ctx: ProbeContext) -> u32 {
     };
     let (sid, _depth) = capture_stack_to_scratch(&ctx, scratch);
 
+    // 手动读栈顶返回地址，覆盖 pcs[0]。
+    // bpf_get_stack 在 uprobe entry 回溯可能不完整（丢失 main/调用者帧），
+    // 直接读 [rsp] 获取调用者返回地址（用户代码 call malloc/calloc/realloc 后的 PC），
+    // 用于用户态 addr2line 精准定位分配调用点。
+    let sp = unsafe { (*ctx.regs).rsp };
+    if sp != 0 {
+        if let Ok(caller_pc) = unsafe { bpf_probe_read_user(sp as *const u64) } {
+            if caller_pc != 0 {
+                unsafe { (*scratch).pcs[0] = caller_pc; }
+                if unsafe { (*scratch).depth } == 0 {
+                    unsafe { (*scratch).depth = 1; }
+                }
+            }
+        }
+    }
+
     let pending = PendingInfo {
         size,
         stack_id: sid,
@@ -406,6 +422,22 @@ pub fn uprobe_calloc_entry(ctx: ProbeContext) -> u32 {
     };
     let (sid, _depth) = capture_stack_to_scratch(&ctx, scratch);
 
+    // 手动读栈顶返回地址，覆盖 pcs[0]。
+    // bpf_get_stack 在 uprobe entry 回溯可能不完整（丢失 main/调用者帧），
+    // 直接读 [rsp] 获取调用者返回地址（用户代码 call malloc/calloc/realloc 后的 PC），
+    // 用于用户态 addr2line 精准定位分配调用点。
+    let sp = unsafe { (*ctx.regs).rsp };
+    if sp != 0 {
+        if let Ok(caller_pc) = unsafe { bpf_probe_read_user(sp as *const u64) } {
+            if caller_pc != 0 {
+                unsafe { (*scratch).pcs[0] = caller_pc; }
+                if unsafe { (*scratch).depth } == 0 {
+                    unsafe { (*scratch).depth = 1; }
+                }
+            }
+        }
+    }
+
     let pending = PendingInfo {
         size: nmemb * size,
         stack_id: sid,
@@ -511,6 +543,22 @@ pub fn uprobe_realloc_entry(ctx: ProbeContext) -> u32 {
         None => return 0,
     };
     let (sid, _depth) = capture_stack_to_scratch(&ctx, scratch);
+
+    // 手动读栈顶返回地址，覆盖 pcs[0]。
+    // bpf_get_stack 在 uprobe entry 回溯可能不完整（丢失 main/调用者帧），
+    // 直接读 [rsp] 获取调用者返回地址（用户代码 call malloc/calloc/realloc 后的 PC），
+    // 用于用户态 addr2line 精准定位分配调用点。
+    let sp = unsafe { (*ctx.regs).rsp };
+    if sp != 0 {
+        if let Ok(caller_pc) = unsafe { bpf_probe_read_user(sp as *const u64) } {
+            if caller_pc != 0 {
+                unsafe { (*scratch).pcs[0] = caller_pc; }
+                if unsafe { (*scratch).depth } == 0 {
+                    unsafe { (*scratch).depth = 1; }
+                }
+            }
+        }
+    }
 
     let pending = PendingInfo {
         size,

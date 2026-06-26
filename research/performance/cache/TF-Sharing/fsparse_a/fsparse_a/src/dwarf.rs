@@ -9,10 +9,10 @@ use std::fs::File;
 use std::path::Path;
 
 use gimli::{
-    AttributeValue, DW_AT_byte_size, DW_AT_data_member_location, DW_AT_location, DW_AT_name,
-    DW_AT_type, DW_TAG_array_type, DW_TAG_base_type, DW_TAG_member, DW_TAG_pointer_type,
-    DW_TAG_structure_type, DW_TAG_typedef, DW_TAG_union_type, DW_TAG_variable, EndianSlice,
-    LittleEndian, SectionId,
+    AttributeValue, DW_AT_byte_size, DW_AT_data_member_location, DW_AT_encoding, DW_AT_location,
+    DW_AT_name, DW_AT_type, DW_TAG_array_type, DW_TAG_base_type, DW_TAG_member,
+    DW_TAG_pointer_type, DW_TAG_structure_type, DW_TAG_typedef, DW_TAG_union_type,
+    DW_TAG_variable, EndianSlice, LittleEndian, SectionId,
 };
 use object::{Object, ObjectSection};
 
@@ -37,6 +37,9 @@ pub struct DwarfType {
     pub byte_size: u64,
     pub fields: Vec<DwarfField>,
     pub kind: TypeKind,
+    /// DWARF DW_AT_encoding，仅对 base_type 有意义。DW_ATE_float=4 表示浮点。
+    /// 0 表示未设置（非 base_type）。
+    pub encoding: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -82,6 +85,8 @@ pub struct DwarfInfo {
     pub globals_by_name: HashMap<String, usize>,
     pub globals_by_addr: BTreeMap<u64, usize>,
     offset_to_name: HashMap<u64, String>,
+    /// addr2line 上下文，用于 PC→源码行查询（精准类型推断）
+    addr2line: Option<addr2line::Context<gimli::EndianSlice<'static, gimli::LittleEndian>>>,
 }
 
 impl DwarfInfo {
@@ -138,7 +143,7 @@ impl DwarfInfo {
                     }
                     DW_TAG_typedef | DW_TAG_base_type | DW_TAG_pointer_type
                     | DW_TAG_array_type => {
-                        if let Some(ty) = parse_simple_type(entry)? {
+                        if let Some(ty) = parse_simple_type(&dwarf, entry)? {
                             if !ty.name.is_empty() {
                                 offset_to_name.insert(offset, ty.name.clone());
                                 if !types.contains_key(&ty.name) {
@@ -171,6 +176,10 @@ impl DwarfInfo {
             }
         }
 
+        // 构建 addr2line 上下文，用于 PC→源码行精准查询
+        // section data 已泄漏为 'static，故 Context 也是 'static
+        let addr2line_ctx = addr2line::Context::from_dwarf(dwarf).ok();
+
         Ok(Self {
             types,
             types_by_offset,
@@ -178,6 +187,7 @@ impl DwarfInfo {
             globals_by_name,
             globals_by_addr,
             offset_to_name,
+            addr2line: addr2line_ctx,
         })
     }
 
@@ -209,6 +219,16 @@ impl DwarfInfo {
 
     pub fn find_global_by_name(&self, name: &str) -> Option<&GlobalVar> {
         self.globals_by_name.get(name).map(|&i| &self.globals[i])
+    }
+
+    /// 根据 PC（malloc 调用点）查询源码文件路径和行号。
+    /// 用于精准类型推断：从 malloc 调用点的源码行提取 (type*) 强制转换。
+    pub fn pc_to_source_line(&self, pc: u64) -> Option<(String, u64)> {
+        let ctx = self.addr2line.as_ref()?;
+        let loc = ctx.find_location(pc).ok().flatten()?;
+        let file = loc.file?.to_string();
+        let line = loc.line? as u64;
+        Some((file, line))
     }
 
     /// 根据类型名和字节偏移解析字段
@@ -282,17 +302,29 @@ fn parse_type(
         byte_size,
         fields,
         kind,
+        encoding: 0,
     }))
 }
 
 fn parse_simple_type(
+    dwarf: &gimli::Dwarf<DwarfReader>,
     entry: &gimli::DebuggingInformationEntry<DwarfReader>,
 ) -> anyhow::Result<Option<DwarfType>> {
-    let name = match get_string_attr_simple(entry)? {
+    let name = match get_name_attr(dwarf, entry)? {
         n if !n.is_empty() => n,
         _ => return Ok(None),
     };
     let byte_size = get_byte_size_attr_simple(entry);
+    let encoding = entry
+        .attr_value(DW_AT_encoding)
+        .ok()
+        .flatten()
+        .and_then(|v| match v {
+            // DW_AT_encoding 以 gimli::constants::DwAte(u8) 形式存储
+            AttributeValue::Encoding(ate) => Some(ate.0 as u64),
+            _ => udata_to_u64(v),
+        })
+        .unwrap_or(0);
 
     let kind = match entry.tag() {
         DW_TAG_typedef => TypeKind::Typedef,
@@ -307,6 +339,7 @@ fn parse_simple_type(
         byte_size,
         fields: Vec::new(),
         kind,
+        encoding,
     }))
 }
 

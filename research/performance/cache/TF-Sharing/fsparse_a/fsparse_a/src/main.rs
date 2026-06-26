@@ -73,6 +73,8 @@ pub struct AllocRecord {
     pub tid: u32,
     pub stack_pcs: Vec<u64>,
     pub live: bool,
+    /// 释放时间戳（bpf_ktime_get_ns）；0 表示未释放
+    pub free_timestamp: u64,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -96,10 +98,11 @@ fn main() -> anyhow::Result<()> {
         } else {
             for ty in dwarf_info.iter_types() {
                 println!(
-                    "  {:<40} size={:>5} fields={}",
+                    "  {:<40} size={:>5} fields={} enc={}",
                     ty.name,
                     ty.byte_size,
-                    ty.fields.len()
+                    ty.fields.len(),
+                    ty.encoding
                 );
             }
         }
@@ -312,6 +315,7 @@ fn handle_event(evt: &MemEvent, alloc_table: &mut AllocTable, dwarf_info: &Dwarf
                 tid: evt.tid,
                 stack_pcs: pcs,
                 live: true,
+                free_timestamp: 0,
             });
             eprintln!("[insert] addr=0x{:x} size={} total={}", addr, size, alloc_table.total_count());
 
@@ -324,9 +328,9 @@ fn handle_event(evt: &MemEvent, alloc_table: &mut AllocTable, dwarf_info: &Dwarf
         }
         EventType::Free => unsafe {
             let addr = evt.data.free_evt.addr;
-            alloc_table.mark_freed(addr);
+            alloc_table.mark_freed(addr, evt.timestamp);
             if cfg!(debug_assertions) {
-                eprintln!("[free]  pid={} tid={} addr=0x{:x}", evt.pid, evt.tid, addr);
+                eprintln!("[free]  pid={} tid={} addr=0x{:x} ts={}", evt.pid, evt.tid, addr, evt.timestamp);
             }
         },
         _ => {}
@@ -338,17 +342,18 @@ fn write_csv(path: &PathBuf, alloc_table: &AllocTable, dwarf: &DwarfInfo) -> any
     let mut f = std::io::BufWriter::new(File::create(path)?);
     writeln!(
         f,
-        "address,size,region,type,field,offset,size_bytes,field_type,infer_method,confidence"
+        "address,size,region,type,field,offset,size_bytes,field_type,infer_method,confidence,alloc_ts,free_ts,live"
     )?;
 
-    for rec in alloc_table.iter_live() {
+    // 输出全部分配（含已释放），便于下游按 hitm 时间窗匹配 live 期间的分配
+    for rec in alloc_table.iter_all() {
         let offset = 0u64;
         let (type_name, field, field_type, infer_method, confidence) =
             resolver::resolve_field_for_alloc(rec, dwarf);
 
         writeln!(
             f,
-            "0x{:x},{},HEAP,{},{},{},{},{},{},confidence={}",
+            "0x{:x},{},HEAP,{},{},{},{},{},{},confidence={},{},{},{}",
             rec.addr,
             rec.size,
             type_name,
@@ -357,7 +362,10 @@ fn write_csv(path: &PathBuf, alloc_table: &AllocTable, dwarf: &DwarfInfo) -> any
             0,
             field_type,
             infer_method,
-            confidence
+            confidence,
+            rec.timestamp,
+            rec.free_timestamp,
+            if rec.live { 1 } else { 0 },
         )?;
     }
 

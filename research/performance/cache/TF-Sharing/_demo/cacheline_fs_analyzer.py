@@ -276,7 +276,7 @@ def parse_hitm_file(hitm_path: str) -> List[Dict]:
             addr_info = parts[2]
             rest = parts[3] if len(parts) > 3 else ''
 
-            if sharing_type != 'F' or region != 'A':
+            if sharing_type != 'F':
                 continue
 
             count_match = re.match(r'(\d+)', rest)
@@ -306,6 +306,42 @@ def parse_hitm_file(hitm_path: str) -> List[Dict]:
             })
 
     return events
+
+
+def extract_hitm_timestamps(work_dir: str) -> Dict[int, Tuple[int, int]]:
+    """从 perf.txt 提取每个数据地址的时间戳范围 (min_ts, max_ts)。
+    用于方案 B：将 hitm 时间窗与 fsparse_a 分配的 [alloc_ts, free_ts) 比对，
+    从而匹配已释放但在 hitm 发生期间仍 live 的分配（如 lreg_args）。"""
+    ts_map: Dict[int, Tuple[int, int]] = {}
+    if not work_dir:
+        return ts_map
+    perf_txt = os.path.join(work_dir, 'perf.txt')
+    if not os.path.exists(perf_txt):
+        return ts_map
+
+    # perf script 行格式示例：
+    # [004] cpu/mem-loads,ldlat=30/P:         1cec32f8     11868100242 |OP LOAD|...
+    # 解析数据地址（十六进制）和时间戳（十进制）
+    pat = re.compile(r'^\[\d+\]\s+\S+:\s+([0-9a-fA-F]+)\s+(\d+)\s+\|OP')
+    with open(perf_txt, 'r', errors='replace') as f:
+        for line in f:
+            m = pat.match(line.strip())
+            if not m:
+                continue
+            try:
+                addr = int(m.group(1), 16)
+                ts = int(m.group(2))
+            except ValueError:
+                continue
+            # 过滤内核地址（0xffffffff...）和过小地址
+            if addr >= 0xffff000000000000 or addr < 0x1000:
+                continue
+            if addr in ts_map:
+                lo, hi = ts_map[addr]
+                ts_map[addr] = (min(lo, ts), max(hi, ts))
+            else:
+                ts_map[addr] = (ts, ts)
+    return ts_map
 
 
 def detect_pie_base(hitm_path: str, binary_path: str) -> Optional[int]:
@@ -661,29 +697,14 @@ def extract_field_from_location(location: str, binary_path: str, func_name: str 
 
 
 def extract_array_access(code: str, func_name: str = '') -> Optional[str]:
+    # 仅保留结构体字段访问（->field 和 obj.field）作为字段名来源。
+    # 不提取数组变量名/形参/局部变量（如 v1[i]/sum[i]/points[i] 中的 v1/sum/points）：
+    # 这些不是结构体字段，会污染 FS 报告。
     keywords = {'if', 'for', 'while', 'switch', 'return', 'else', 'int',
                 'float', 'double', 'char', 'void', 'const', 'unsigned',
                 'long', 'short', 'auto', 'sizeof', 'NULL', 'break',
                 'continue', 'case', 'default', 'struct', 'typedef',
                 'new', 'delete', 'this', 'true', 'false'}
-
-    lhs_match = re.search(r'([a-zA-Z_][a-zA-Z0-9_]*)\s*\[[^\]]*\]\s*=', code)
-    if lhs_match:
-        name = lhs_match.group(1)
-        if name not in keywords:
-            type_name = extract_type_from_func_name(func_name)
-            if type_name:
-                return f"{type_name}.{name}"
-            return name
-
-    match = re.search(r'([a-zA-Z_][a-zA-Z0-9_]*)\s*\[', code)
-    if match:
-        name = match.group(1)
-        if name not in keywords:
-            type_name = extract_type_from_func_name(func_name)
-            if type_name:
-                return f"{type_name}.{name}"
-            return name
 
     match = re.search(r'->([a-zA-Z_][a-zA-Z0-9_]*)', code)
     if match:
@@ -781,17 +802,17 @@ def extract_field_from_func_name(func_name: str) -> Optional[str]:
 
 
 def extract_local_var(code: str) -> Optional[str]:
-    match = re.search(r'([a-zA-Z_][a-zA-Z0-9_]*)\s*=', code)
-    if match:
-        name = match.group(1)
-        keywords = {'if', 'for', 'while', 'switch', 'return', 'else', 'int',
-                    'float', 'double', 'char', 'void', 'const', 'unsigned'}
-        if name not in keywords:
-            return name
+    # 不从源码行提取局部变量名当字段名：局部变量不是结构体字段，
+    # 会污染 FS 报告（如 v1/sum/point 等形参/局部变量）。
+    # 当 DWARF/符号表无法解析字段时，保持未知。
     return None
 
 
 def trace_caller_array(file_path: str, source_lines: list, line_num: int, func_name: str) -> Optional[str]:
+    # 禁用：从调用者代码提取数组变量名（如 points[i] 的 points）属于源码标识符提取，
+    # 不是结构体字段，会污染 FS 报告。字段名只应来自 DWARF 解析（fsparse_a）。
+    return None
+
     demangled = demangle(func_name)
     func_short = demangled.split('(')[0].strip()
     func_short = func_short.split()[-1] if func_short else ''
@@ -1082,12 +1103,9 @@ def infer_fields_from_source_voting(hitm_path: str) -> Dict[int, Dict[str, int]]
                         addr_field_votes[addr][field_name] += count
                     continue
 
-                arr_match = re.search(r'([a-zA-Z_][a-zA-Z0-9_]*)\[', code)
-                if arr_match:
-                    var_name = arr_match.group(1)
-                    if var_name not in ('if', 'for', 'while', 'switch', 'return'):
-                        for addr in addr_vals:
-                            addr_field_votes[addr][var_name] += count
+                # 不从源码行提取数组变量名/形参/局部变量当字段名：
+                # 这些不是结构体字段，会污染 FS 报告（如 v1/sum/points 等）。
+                # 当 DWARF/符号表无法解析字段时，保持未知，不退化到源码标识符。
 
     return addr_field_votes
 
@@ -1123,12 +1141,19 @@ def parse_memscope_data(memscope_path: str) -> List[Dict]:
                     continue
                 addr = int(addr_str, 16)
                 size = int(row.get('size', '0') or '0')
+                # 时间窗字段（fsparse_a 方案 B 输出）
+                alloc_ts = int(row.get('alloc_ts', '0') or '0')
+                free_ts = int(row.get('free_ts', '0') or '0')
+                live_flag = int(row.get('live', '1') or '1')
                 allocations.append({
                     'addr': addr,
                     'size': size,
                     'type': row.get('type', '') or '',
                     'field': row.get('field', '') or '',
                     'offset': int(row.get('offset', '0') or '0'),
+                    'alloc_ts': alloc_ts,
+                    'free_ts': free_ts,
+                    'live': live_flag,
                 })
             except (ValueError, KeyError):
                 continue
@@ -1160,130 +1185,96 @@ def _parse_csv_line(line: str) -> List[str]:
 
 def find_field_for_addr(addr: int, memscope_allocs: List[Dict],
                         layouts: Dict[str, Dict[int, str]] = None,
-                        sizes: Dict[str, int] = None) -> Optional[str]:
+                        sizes: Dict[str, int] = None,
+                        hitm_ts: int = 0) -> Optional[str]:
     # 第一遍：精确匹配（地址在分配范围内）
+    # 优先匹配时间窗内的分配，若无则回退到任意地址匹配
+    matched_alloc = None
     for alloc in memscope_allocs:
         alloc_addr = alloc['addr']
         alloc_size = alloc['size']
         if alloc_addr <= addr < alloc_addr + alloc_size:
-            field = alloc.get('field', '')
-            type_name = alloc.get('type', '')
-            # 去掉 (ambiguous) 等后缀
-            clean_type = type_name
-            if ' (' in clean_type:
-                clean_type = clean_type[:clean_type.index(' (')]
-
-            offset = addr - alloc_addr
-
-            # 如果有 struct layout，根据偏移重新计算字段
-            if layouts and sizes and clean_type in layouts:
-                struct_size = sizes.get(clean_type, 0)
-                if struct_size > 0 and alloc_size > struct_size:
-                    # 数组分配：计算元素索引和元素内偏移
-                    elem_index = offset // struct_size
-                    elem_offset = offset % struct_size
-                    layout = layouts[clean_type]
-                    # 找到 elem_offset 对应的字段
-                    nearest_offset = None
-                    for fo in sorted(layout.keys()):
-                        if fo <= elem_offset:
-                            nearest_offset = fo
-                        else:
-                            break
-                    if nearest_offset is not None:
-                        return f"{clean_type}[{elem_index}].{layout[nearest_offset]}"
-                    return f"{clean_type}[{elem_index}]+0x{elem_offset:x}"
-                elif struct_size > 0:
-                    # 单元素分配
-                    layout = layouts[clean_type]
-                    nearest_offset = None
-                    for fo in sorted(layout.keys()):
-                        if fo <= offset:
-                            nearest_offset = fo
-                        else:
-                            break
-                    if nearest_offset is not None:
-                        return f"{clean_type}.{layout[nearest_offset]}"
-                    return f"{clean_type}+0x{offset:x}"
-
-            # 没有 layout，回退到原逻辑
-            if field:
-                if type_name and type_name in field:
-                    return field
-                elif type_name:
-                    return f"{type_name}.{field}"
-                else:
-                    return field
-            elif type_name:
-                return type_name
-            else:
-                return f"+0x{offset:x}"
-
-    # 第二遍：附近分配推断（地址不在任何分配范围内，但靠近某个数组分配）
-    # 场景：fsparse_a 漏掉了某些 malloc 调用，但 hitm 地址落在某个
-    # 已知数组分配的延伸范围内（例如 malloc(512) 被记录为 malloc(1024)，
-    # 或者分配基址有偏差）
-    if layouts and sizes:
-        best_match = None
-        best_dist = float('inf')
-        for alloc in memscope_allocs:
-            type_name = alloc.get('type', '')
-            clean_type = type_name
-            if ' (' in clean_type:
-                clean_type = clean_type[:clean_type.index(' (')]
-            if clean_type not in layouts:
-                continue
-            struct_size = sizes.get(clean_type, 0)
-            if struct_size <= 0:
-                continue
-            alloc_addr = alloc['addr']
-            alloc_size = alloc['size']
-            # 计算地址相对于分配基址的偏移
-            offset = addr - alloc_addr
-            # 允许偏移为负（地址在分配之前）或超过分配大小
-            # 但限制在合理范围内（不超过 2 倍分配大小）
-            if offset < -struct_size or offset > alloc_size + struct_size * 2:
-                continue
-            dist = 0
-            if offset < 0:
-                dist = -offset
-            elif offset >= alloc_size:
-                dist = offset - alloc_size + 1
-            if dist < best_dist:
-                best_dist = dist
-                # 推断数组索引和元素内偏移
-                if offset < 0:
-                    elem_index = offset // struct_size
-                    elem_offset = offset % struct_size
-                    if elem_offset < 0:
-                        elem_offset += struct_size
-                        elem_index -= 1
-                else:
-                    elem_index = offset // struct_size
-                    elem_offset = offset % struct_size
-                layout = layouts[clean_type]
-                nearest_offset = None
-                for fo in sorted(layout.keys()):
-                    if fo <= elem_offset:
-                        nearest_offset = fo
-                    else:
-                        break
-                if nearest_offset is not None:
-                    best_match = f"{clean_type}[{elem_index}].{layout[nearest_offset]}"
-                else:
-                    best_match = f"{clean_type}[{elem_index}]+0x{elem_offset:x}"
-
-        # 只有在距离足够近时才返回推断结果（不超过 2 个结构体大小）
-        if best_match and best_dist < 256:
-            return best_match
-
+            # 方案 B：时间窗过滤
+            # 若提供 hitm_ts 且分配有时间戳，则检查 hitm 是否发生在 alloc 的 live 期间
+            # free_ts=0 表示未释放，视为 live 到无穷大
+            if hitm_ts > 0:
+                alloc_ts = alloc.get('alloc_ts', 0)
+                free_ts = alloc.get('free_ts', 0)
+                if alloc_ts > 0 and alloc_ts <= hitm_ts and (free_ts == 0 or hitm_ts < free_ts):
+                    return _resolve_alloc_field(addr, alloc, layouts, sizes)
+            # 无时间戳或时间窗检查不可用时，记录第一个地址匹配的分配
+            if matched_alloc is None:
+                matched_alloc = alloc
+    if matched_alloc:
+        return _resolve_alloc_field(addr, matched_alloc, layouts, sizes)
     return None
+
+
+def _resolve_alloc_field(addr: int, alloc: Dict,
+                         layouts: Dict[str, Dict[int, str]] = None,
+                         sizes: Dict[str, int] = None) -> Optional[str]:
+    """根据分配信息解析地址对应的字段名"""
+    alloc_addr = alloc['addr']
+    field = alloc.get('field', '')
+    type_name = alloc.get('type', '')
+    # 去掉 (ambiguous) 等后缀
+    clean_type = type_name
+    if ' (' in clean_type:
+        clean_type = clean_type[:clean_type.index(' (')]
+
+    offset = addr - alloc_addr
+
+    # 如果有 struct layout，根据偏移重新计算字段
+    if layouts and sizes and clean_type in layouts:
+        struct_size = sizes.get(clean_type, 0)
+        alloc_size = alloc['size']
+        if struct_size > 0 and alloc_size > struct_size:
+            # 数组分配：计算元素索引和元素内偏移
+            elem_index = offset // struct_size
+            elem_offset = offset % struct_size
+            layout = layouts[clean_type]
+            # 找到 elem_offset 对应的字段
+            nearest_offset = None
+            for fo in sorted(layout.keys()):
+                if fo <= elem_offset:
+                    nearest_offset = fo
+                else:
+                    break
+            if nearest_offset is not None:
+                return f"{clean_type}[{elem_index}].{layout[nearest_offset]}"
+            return f"{clean_type}[{elem_index}]+0x{elem_offset:x}"
+        elif struct_size > 0:
+            # 单元素分配
+            layout = layouts[clean_type]
+            nearest_offset = None
+            for fo in sorted(layout.keys()):
+                if fo <= offset:
+                    nearest_offset = fo
+                else:
+                    break
+            if nearest_offset is not None:
+                return f"{clean_type}.{layout[nearest_offset]}"
+            return f"{clean_type}+0x{offset:x}"
+
+    # 没有 layout，回退到原逻辑
+    if field:
+        if type_name and type_name in field:
+            return field
+        elif type_name:
+            return f"{type_name}.{field}"
+        else:
+            return field
+    elif type_name:
+        return type_name
+    else:
+        return f"+0x{offset:x}"
 
 
 def resolve_addr_field(addr: int,
                        addr_fields_rip: Dict[int, Dict[str, int]],
                        addr_field_votes: Dict[int, Dict[str, int]],
-                       memscope_allocs: List[Dict]) -> Optional[str]:
+                       memscope_allocs: List[Dict],
+                       hitm_ts: int = 0) -> Optional[str]:
     # 只使用 RIP 直接推断（不使用投票）
     if addr in addr_fields_rip:
         votes = addr_fields_rip[addr]
@@ -1299,7 +1290,7 @@ def resolve_addr_field(addr: int,
             return None
 
     # 只使用 memscope 匹配（不使用投票）
-    field_memscope = find_field_for_addr(addr, memscope_allocs)
+    field_memscope = find_field_for_addr(addr, memscope_allocs, hitm_ts=hitm_ts)
     if field_memscope:
         return field_memscope
 
@@ -1744,84 +1735,153 @@ def resolve_fields_by_struct_layout(all_addrs: Set[int],
                                      addr_fields_rip: Dict[int, Dict[str, int]],
                                      events: List[Dict],
                                      binary_path: Optional[str] = None,
-                                     addr_field_votes: Dict[int, Dict[str, int]] = None) -> Dict[int, str]:
-    """通过 DWARF 结构体布局推断地址 → 字段映射（通用版本）。"""
+                                     addr_field_votes: Dict[int, Dict[str, int]] = None,
+                                     memscope_allocs: List[Dict] = None) -> Dict[int, str]:
+    """通过 DWARF 结构体布局推断地址 → 字段映射（通用版本）。
+
+    优先使用 memscope 分配基址计算绝对偏移，对大结构体也能正确解析。
+    仅在无 memscope 数据时回退到 cacheline 内偏移推断。
+    """
     addr_field_map = {}
-
-    cachelines = defaultdict(set)
-    for addr in all_addrs:
-        cl = addr_to_cacheline(addr)
-        cachelines[cl].add(addr)
-
-    struct_types = extract_struct_type_from_rips(addr_fields_rip)
-
-    # 如果 addr_fields_rip 为空，尝试从 addr_field_votes（源码推断）中提取字段名，
-    # 然后通过 DWARF 查找包含这些字段的结构体类型
-    if not struct_types and binary_path and addr_field_votes:
-        layouts, sizes = _extract_struct_layouts(binary_path)
-        # 收集所有源码推断的字段名
-        all_field_names = set()
-        for votes in addr_field_votes.values():
-            all_field_names.update(votes.keys())
-        # 在 DWARF 结构体中查找包含这些字段名的类型
-        for type_name, layout in layouts.items():
-            layout_fields = set(layout.values())
-            if all_field_names & layout_fields:
-                struct_types.add(type_name)
-
-    if not struct_types:
+    if not binary_path:
         return addr_field_map
 
-    cl_struct_type = {}
-    for cl, addrs_in_cl in cachelines.items():
-        st = find_candidate_struct_for_cacheline(cl, addrs_in_cl, struct_types, binary_path)
-        if st:
-            cl_struct_type[cl] = st
+    layouts, sizes = _extract_struct_layouts(binary_path)
 
-    for addr in all_addrs:
-        cl = addr_to_cacheline(addr)
-        st = cl_struct_type.get(cl)
-        if st:
-            field = resolve_field_by_struct_offset(addr, st, binary_path)
-            if field:
-                addr_field_map[addr] = field
+    # ---- 路径1：基于 memscope 分配基址的精确解析 ----
+    if memscope_allocs:
+        for addr in all_addrs:
+            for alloc in memscope_allocs:
+                alloc_addr = alloc['addr']
+                alloc_size = alloc['size']
+                type_name = alloc.get('type', '')
+                # 清理类型名
+                clean_type = type_name
+                if ' (' in clean_type:
+                    clean_type = clean_type[:clean_type.index(' (')]
+                if clean_type not in layouts:
+                    continue
+                struct_size = sizes.get(clean_type, 0)
+                if struct_size <= 0:
+                    continue
+                # 检查地址是否在分配范围内
+                if alloc_addr <= addr < alloc_addr + alloc_size:
+                    offset_from_alloc = addr - alloc_addr
+                    elem_index = offset_from_alloc // struct_size
+                    offset_in_elem = offset_from_alloc % struct_size
+                    # 在结构体布局中查找字段
+                    layout = layouts[clean_type]
+                    field_name = _resolve_field_at_offset(layout, offset_in_elem, clean_type)
+                    if field_name:
+                        # 添加数组元素索引
+                        if elem_index > 0 or alloc_size > struct_size:
+                            addr_field_map[addr] = f"{clean_type}[{elem_index}].{field_name}"
+                        else:
+                            addr_field_map[addr] = f"{clean_type}.{field_name}"
+                    break  # 找到匹配的分配就停止
 
-    # 后处理：为结构体大小 == cacheline 大小的类型推断数组索引
-    # 当 struct_size == CACHE_LINE_SIZE 时，每个元素占一个完整的 cacheline，
-    # resolve_field_by_struct_offset 无法区分数组索引，需要根据地址连续性推断
-    if binary_path:
-        layouts, sizes = _extract_struct_layouts(binary_path)
-        for st in set(cl_struct_type.values()):
-            struct_size = sizes.get(st, 0)
-            if struct_size != CACHE_LINE_SIZE:
-                continue
-            # 收集属于此类型的所有地址
-            type_addrs = []
-            for addr in all_addrs:
+    # ---- 路径2：基于 cacheline 内偏移的回退推断（仅用于无 memscope 匹配的地址）----
+    unresolved = all_addrs - set(addr_field_map.keys())
+    if unresolved:
+        struct_types = extract_struct_type_from_rips(addr_fields_rip)
+        if not struct_types and addr_field_votes:
+            all_field_names = set()
+            for votes in addr_field_votes.values():
+                all_field_names.update(votes.keys())
+            for type_name, layout in layouts.items():
+                layout_fields = set(layout.values())
+                if all_field_names & layout_fields:
+                    struct_types.add(type_name)
+
+        if struct_types:
+            cachelines = defaultdict(set)
+            for addr in unresolved:
                 cl = addr_to_cacheline(addr)
-                if cl_struct_type.get(cl) == st:
-                    type_addrs.append(addr)
-            if not type_addrs:
-                continue
-            # 按 cacheline 分组，确定数组基址
-            cl_addrs = sorted(set(addr_to_cacheline(a) for a in type_addrs))
-            if len(cl_addrs) <= 1:
-                continue
-            # 推断数组基址：最小的 cacheline 地址
-            base_cl = cl_addrs[0]
-            for addr in type_addrs:
+                cachelines[cl].add(addr)
+
+            cl_struct_type = {}
+            for cl, addrs_in_cl in cachelines.items():
+                st = find_candidate_struct_for_cacheline(cl, addrs_in_cl, struct_types, binary_path)
+                if st:
+                    cl_struct_type[cl] = st
+
+            for addr in unresolved:
                 cl = addr_to_cacheline(addr)
-                elem_index = (cl - base_cl) // struct_size
-                old_field = addr_field_map.get(addr, '')
-                if old_field and '[' not in old_field:
-                    # 将 "lreg_args.SX" 转换为 "lreg_args[2].SX"
+                st = cl_struct_type.get(cl)
+                if st:
+                    field = resolve_field_by_struct_offset(addr, st, binary_path)
+                    if field:
+                        addr_field_map[addr] = field
+
+            # 后处理：为结构体数组推断元素索引（仅对回退路径）
+            for st in set(cl_struct_type.values()):
+                struct_size = sizes.get(st, 0)
+                if struct_size <= 0:
+                    continue
+                type_addrs = [a for a in unresolved
+                              if addr_to_cacheline(a) in cl_struct_type
+                              and cl_struct_type[addr_to_cacheline(a)] == st]
+                if not type_addrs:
+                    continue
+                cl_addrs = sorted(set(addr_to_cacheline(a) for a in type_addrs))
+                if len(cl_addrs) <= 1:
+                    continue
+                min_addr = min(type_addrs)
+                base_addr = (min_addr // struct_size) * struct_size
+                for addr in type_addrs:
+                    offset_from_base = addr - base_addr
+                    elem_index = offset_from_base // struct_size
+                    old_field = addr_field_map.get(addr, '')
+                    if not old_field:
+                        continue
                     dot_pos = old_field.find('.')
                     if dot_pos > 0:
                         type_prefix = old_field[:dot_pos]
                         field_suffix = old_field[dot_pos + 1:]
-                        addr_field_map[addr] = f"{type_prefix}[{elem_index}].{field_suffix}"
+                        if '[' not in type_prefix:
+                            addr_field_map[addr] = f"{type_prefix}[{elem_index}].{field_suffix}"
 
     return addr_field_map
+
+
+def _resolve_field_at_offset(layout: Dict[int, str], offset: int,
+                              struct_type: str) -> Optional[str]:
+    """根据结构体布局和元素内偏移解析字段名。
+
+    处理普通字段和数组字段（如 red[5]）。
+    """
+    # 检查是否精确匹配某个字段偏移
+    if offset in layout:
+        return layout[offset]
+
+    # 查找最近的字段偏移（字段可能跨越多个偏移）
+    nearest_offset = None
+    for field_offset in sorted(layout.keys()):
+        if field_offset <= offset:
+            nearest_offset = field_offset
+        else:
+            break
+
+    if nearest_offset is None:
+        return None
+
+    field_name = layout[nearest_offset]
+    # 计算字段内的偏移
+    field_internal_offset = offset - nearest_offset
+
+    # 如果字段内偏移 > 0，可能是数组元素的索引
+    if field_internal_offset > 0 and field_internal_offset % 4 == 0:
+        # 假设是 int 数组（4 字节元素）
+        arr_index = field_internal_offset // 4
+        return f"{field_name}[{arr_index}]"
+    elif field_internal_offset > 0 and field_internal_offset % 8 == 0:
+        # 可能是 long/指针数组
+        arr_index = field_internal_offset // 8
+        return f"{field_name}[{arr_index}]"
+    elif field_internal_offset > 0:
+        return f"{field_name}+0x{field_internal_offset:x}"
+    else:
+        return field_name
 
 
 def analyze(events: List[Dict],
@@ -1836,9 +1896,44 @@ def analyze(events: List[Dict],
         all_addrs.add(event['addr1'])
         all_addrs.add(event['addr2'])
 
+    # 方案 B：从 perf.txt 提取每个地址的 hitm 时间戳范围
+    hitm_ts_map = extract_hitm_timestamps(work_dir)
+    has_ts = bool(hitm_ts_map)
+    # 计算时间戳偏移量：perf 时间戳是相对值，fsparse_a 是 boot time 绝对值
+    # 用两边各自的最小时间戳对齐
+    ts_offset = 0
+    if has_ts and memscope_allocs:
+        perf_min = min(lo for lo, _ in hitm_ts_map.values())
+        alloc_ts_list = [a.get('alloc_ts', 0) for a in memscope_allocs if a.get('alloc_ts', 0) > 0]
+        if alloc_ts_list:
+            fsparse_min = min(alloc_ts_list)
+            ts_offset = fsparse_min - perf_min
+            print(f"  hitm 时间戳: {len(hitm_ts_map)} 个地址（来自 perf.txt）, 偏移量={ts_offset}")
+        else:
+            has_ts = False
+    elif has_ts:
+        print(f"  hitm 时间戳: {len(hitm_ts_map)} 个地址（来自 perf.txt）")
+
+    def _get_hitm_ts(addr: int) -> int:
+        """返回地址的 hitm 代表时间戳（取 min_ts）。
+        若地址无时间戳，回退到同 cacheline 内任意地址的时间戳。
+        返回值已加上 ts_offset，与 fsparse_a 的 boot time 对齐。"""
+        ts = 0
+        if addr in hitm_ts_map:
+            ts = hitm_ts_map[addr][0]
+        else:
+            # 回退：同 cacheline 内的地址
+            cl = addr & ~0x3f
+            for a, (lo, _hi) in hitm_ts_map.items():
+                if (a & ~0x3f) == cl:
+                    ts = lo
+                    break
+        return ts + ts_offset if ts > 0 else 0
+
     memscope_matched = 0
     for addr in all_addrs:
-        if find_field_for_addr(addr, memscope_allocs):
+        ts = _get_hitm_ts(addr) if has_ts else 0
+        if find_field_for_addr(addr, memscope_allocs, hitm_ts=ts):
             memscope_matched += 1
     if memscope_allocs:
         if memscope_matched > 0:
@@ -1854,7 +1949,7 @@ def analyze(events: List[Dict],
     # 提取 struct layouts 供 find_field_for_addr 使用
     struct_layouts, struct_sizes = _extract_struct_layouts(binary_path)
 
-    layout_map = resolve_fields_by_struct_layout(all_addrs, addr_fields_rip, events, binary_path, addr_field_votes)
+    layout_map = resolve_fields_by_struct_layout(all_addrs, addr_fields_rip, events, binary_path, addr_field_votes, memscope_allocs)
     for addr in all_addrs:
         if addr in layout_map:
             addr_field_map[addr] = layout_map[addr]
@@ -1865,7 +1960,8 @@ def analyze(events: List[Dict],
 
     for addr in all_addrs:
         if addr not in addr_field_map:
-            field = find_field_for_addr(addr, memscope_allocs, struct_layouts, struct_sizes)
+            ts = _get_hitm_ts(addr) if has_ts else 0
+            field = find_field_for_addr(addr, memscope_allocs, struct_layouts, struct_sizes, hitm_ts=ts)
             if field:
                 addr_field_map[addr] = field
                 mem_resolved += 1
@@ -1875,7 +1971,8 @@ def analyze(events: List[Dict],
 
     for addr in all_addrs:
         if addr not in addr_field_map:
-            field = resolve_addr_field(addr, addr_fields_rip, addr_field_votes, memscope_allocs)
+            ts = _get_hitm_ts(addr) if has_ts else 0
+            field = resolve_addr_field(addr, addr_fields_rip, addr_field_votes, memscope_allocs, hitm_ts=ts)
             if field:
                 addr_field_map[addr] = field
                 rip_resolved += 1
@@ -1979,8 +2076,6 @@ def generate_reports(analysis: Dict, output_dir: str, events: List[Dict]):
         writer.writerow(['字段1', '字段2', 'FS次数'])
         sorted_pairs = sorted(pair_counts.items(), key=lambda x: -x[1])
         for (f1, f2), count in sorted_pairs:
-            if f1 == f2:
-                continue
             writer.writerow([f1, f2, count])
 
     print(f"CSV 报告已生成：{csv_path}")
@@ -2164,8 +2259,31 @@ def main():
     print(f"Memscope: {memscope_path or '(未提供)'}")
     print(f"输出目录: {output_dir}")
 
+    # 先加载 memscope 分配记录，用于纠正地址分类
+    memscope_allocs = []
+    if memscope_path:
+        memscope_allocs = parse_memscope_data(memscope_path)
+        print(f"解析到 {len(memscope_allocs)} 个 memscope 分配记录")
+
     events = parse_hitm_file(hitm_path)
-    print(f"\n解析到 {len(events)} 个 F,A (堆上 False Sharing) 事件")
+    print(f"\n解析到 {len(events)} 个 False Sharing 事件（含堆/栈/全局）")
+
+    # 用 memscope 分配信息纠正地址分类：perfparse 可能将 mmap 的堆地址误判为栈
+    if memscope_allocs:
+        def _is_heap_addr(addr):
+            for alloc in memscope_allocs:
+                if alloc['addr'] <= addr < alloc['addr'] + alloc['size']:
+                    return True
+            return False
+
+        filtered = []
+        for ev in events:
+            if _is_heap_addr(ev['addr1']) or _is_heap_addr(ev['addr2']):
+                filtered.append(ev)
+        if len(filtered) < len(events):
+            print(f"  memscope 纠正：{len(events) - len(filtered)} 个栈地址事件被识别为非堆，过滤")
+            print(f"  保留 {len(filtered)} 个堆上 False Sharing 事件")
+        events = filtered
 
     if not events:
         print("没有检测到堆上 False Sharing 事件，退出。")
@@ -2195,11 +2313,6 @@ def main():
     addr_field_votes = infer_fields_from_source_voting(hitm_path)
     if addr_field_votes:
         print(f"基于源码行号投票推断字段归属... 推断了 {len(addr_field_votes)} 个地址")
-
-    memscope_allocs = []
-    if memscope_path:
-        memscope_allocs = parse_memscope_data(memscope_path)
-        print(f"解析到 {len(memscope_allocs)} 个 memscope 分配记录")
 
     work_dir_for_detect = args.work_dir or os.path.dirname(hitm_path)
     analysis = analyze(events, addr_fields_rip, addr_field_votes, memscope_allocs, work_dir_for_detect, args.num_options, binary_path)

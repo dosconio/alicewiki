@@ -20,6 +20,8 @@ object = "0.36"
 memmap2 = "0.9"
 typed-arena = "2.0"
 fallible-iterator = "0.3"
+addr2line = "0.24"
+regex = "1"
 
 [build-dependencies]
 # 不在 build 时编译 eBPF，由 xtask 统一构建后从 target 目录读取

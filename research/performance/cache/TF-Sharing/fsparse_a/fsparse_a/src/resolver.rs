@@ -39,10 +39,11 @@ impl AllocTable {
         self.records.push(rec);
     }
 
-    pub fn mark_freed(&mut self, addr: u64) {
+    pub fn mark_freed(&mut self, addr: u64, free_ts: u64) {
         if let Some(&idx) = self.by_addr.get(&addr) {
             if self.records[idx].live {
                 self.records[idx].live = false;
+                self.records[idx].free_timestamp = free_ts;
                 self.freed_count += 1;
             }
         }
@@ -109,58 +110,61 @@ pub fn resolve_field_for_addr(
 
     let offset = addr - rec.addr;
 
-    // 尝试根据分配大小推断类型
-    if let Some((type_name, ty)) = infer_type_by_size(rec.size, dwarf) {
-        let struct_size = ty.byte_size;
-        if struct_size > 0 && rec.size > struct_size {
-            // 数组分配：计算元素索引和元素内偏移
-            let elem_index = offset / struct_size;
-            let elem_offset = offset % struct_size;
+    // 用 malloc 调用点 PC 查源码行，提取 (type*) 强制转换的精准类型。
+    // 不依赖 size 猜测——size 启发式会对 int/double/long double 等同字节数类型误判。
+    if let Some(type_name) = infer_type_from_callsite(rec, dwarf) {
+        if let Some(ty) = dwarf.find_type_by_name(&type_name) {
+            let struct_size = ty.byte_size;
+            if struct_size > 0 && rec.size > struct_size {
+                // 数组分配：计算元素索引和元素内偏移
+                let elem_index = offset / struct_size;
+                let elem_offset = offset % struct_size;
 
-            if let Some(field) = dwarf.resolve_field_at_offset(&type_name, elem_offset) {
+                if let Some(field) = dwarf.resolve_field_at_offset(&type_name, elem_offset) {
+                    return (
+                        type_name.clone(),
+                        format!("{}[{}].{}", type_name, elem_index, field.name),
+                        field.type_name.clone(),
+                        "callsite_cast".into(),
+                        0.95,
+                    );
+                }
                 return (
                     type_name.clone(),
-                    format!("{}[{}].{}", type_name, elem_index, field.name),
-                    field.type_name.clone(),
-                    "array_size_match".into(),
-                    0.85,
+                    format!("{}[{}]", type_name, elem_index),
+                    String::new(),
+                    "callsite_cast".into(),
+                    0.9,
                 );
-            }
-            return (
-                type_name.clone(),
-                format!("{}[{}]+0x{:x}", type_name, elem_index, elem_offset),
-                String::new(),
-                "array_size_match".into(),
-                0.5,
-            );
-        } else if struct_size > 0 {
-            // 单元素分配
-            if let Some(field) = dwarf.resolve_field_at_offset(&type_name, offset) {
+            } else if struct_size > 0 {
+                // 单元素分配
+                if let Some(field) = dwarf.resolve_field_at_offset(&type_name, offset) {
+                    return (
+                        type_name.clone(),
+                        format!("{}.{}", type_name, field.name),
+                        field.type_name.clone(),
+                        "callsite_cast".into(),
+                        0.95,
+                    );
+                }
                 return (
                     type_name.clone(),
-                    format!("{}.{}", type_name, field.name),
-                    field.type_name.clone(),
-                    "size_match".into(),
-                    0.75,
+                    format!("{}+0x{:x}", type_name, offset),
+                    String::new(),
+                    "callsite_cast".into(),
+                    0.9,
                 );
             }
-            return (
-                type_name.clone(),
-                format!("{}+0x{:x}", type_name, offset),
-                String::new(),
-                "size_match".into(),
-                0.4,
-            );
         }
     }
 
-    // 无法推断类型，仅返回偏移
+    // callsite 无法精准识别类型，仅返回偏移
     (
-        String::new(),
+        "unknown".into(),
         format!("+0x{:x}", offset),
         String::new(),
-        "offset_only".into(),
-        0.1,
+        "no_type".into(),
+        0.0,
     )
 }
 
@@ -169,73 +173,136 @@ pub fn resolve_field_for_alloc(
     rec: &AllocRecord,
     dwarf: &DwarfInfo,
 ) -> (String, String, String, String, f32) {
-    // 尝试根据分配大小推断类型
-    if let Some((type_name, ty)) = infer_type_by_size(rec.size, dwarf) {
-        let struct_size = ty.byte_size;
-        if struct_size > 0 && rec.size > struct_size {
-            // 数组分配：基址对应 [0]
-            // 注意：不添加 (ambiguous) 后缀，cacheline_fs_analyzer 会根据
-            // 地址偏移和结构体布局重新计算具体字段（如 lreg_args[3].SXY）
-            if let Some(field) = dwarf.resolve_field_at_offset(&type_name, 0) {
+    // 优先用 malloc 调用点 PC 查源码行，提取 (type*) 强制转换的真实类型。
+    // 这是精准类型推断，不依赖 size 猜测。
+    if let Some(type_name) = infer_type_from_callsite(rec, dwarf) {
+        // 找到 DWARF 中对应的类型，确认存在并取 byte_size
+        if let Some(ty) = dwarf.find_type_by_name(&type_name) {
+            let struct_size = ty.byte_size;
+            if struct_size > 0 && rec.size > struct_size {
+                // 数组分配
+                if let Some(field) = dwarf.resolve_field_at_offset(&type_name, 0) {
+                    return (
+                        type_name.clone(),
+                        format!("{}[0].{}", type_name, field.name),
+                        field.type_name.clone(),
+                        "callsite_cast".into(),
+                        0.95,
+                    );
+                }
                 return (
                     type_name.clone(),
-                    format!("{}[0].{}", type_name, field.name),
-                    field.type_name.clone(),
-                    "array_size_match".into(),
-                    0.15,
+                    format!("{}[0]", type_name),
+                    String::new(),
+                    "callsite_cast".into(),
+                    0.95,
                 );
+            } else if struct_size > 0 {
+                if let Some(field) = dwarf.resolve_field_at_offset(&type_name, 0) {
+                    return (
+                        type_name.clone(),
+                        format!("{}.{}", type_name, field.name),
+                        field.type_name.clone(),
+                        "callsite_cast".into(),
+                        0.95,
+                    );
+                }
             }
+            // 类型已知但 size 不匹配结构体，仍返回真实类型
             return (
                 type_name.clone(),
                 format!("{}[0]", type_name),
                 String::new(),
-                "array_size_match".into(),
-                0.15,
+                "callsite_cast".into(),
+                0.9,
             );
-        } else if struct_size > 0 {
-            if let Some(field) = dwarf.resolve_field_at_offset(&type_name, 0) {
-                return (
-                    type_name.clone(),
-                    format!("{}.{}", type_name, field.name),
-                    field.type_name.clone(),
-                    "size_match".into(),
-                    0.3,
-                );
-            }
         }
     }
 
+    // callsite 解析了 PC 但未匹配到 (type*) 强制转换：
+    //   说明该 malloc 调用点在用户代码中无强制转换（C 隐式赋值），
+    //   或属于库内部 malloc（如 pthread_create 内部分配）。
+    //   不回退 size 猜测——size 启发式会对 int/double/long double 等同字节数类型误判。
+    if rec.stack_pcs.iter().any(|pc| dwarf.pc_to_source_line(*pc).is_some()) {
+        return (
+            "unknown".into(),
+            "+0x0".into(),
+            String::new(),
+            "callsite_no_cast".into(),
+            0.0,
+        );
+    }
+
+    // 完全无 PC（栈采样未覆盖用户代码）：无法精准识别类型。
+    // 不回退 size 猜测——size 启发式会对 int/double/long double 等同字节数类型误判
+    // （如 4字节 int 被猜成 float，8字节 double 被猜成 long long）。
     (
-        String::new(),
-        format!("+0x0"),
+        "unknown".into(),
+        "+0x0".into(),
         String::new(),
         "no_type".into(),
         0.0,
     )
 }
 
-/// 根据分配大小推断类型（与 memscope 的 size_index 类似）
-fn infer_type_by_size<'a>(
-    size: u64,
-    dwarf: &'a DwarfInfo,
-) -> Option<(String, &'a crate::dwarf::DwarfType)> {
-    // 优先匹配：分配大小是某结构体大小的整数倍
-    let mut best: Option<(&String, &crate::dwarf::DwarfType)> = None;
-    let mut best_ratio = u64::MAX;
-
-    for (name, ty) in dwarf.types.iter() {
-        if ty.byte_size == 0 || ty.fields.is_empty() {
-            continue;
-        }
-        if size % ty.byte_size == 0 {
-            let ratio = size / ty.byte_size;
-            // 偏好 ratio 较小（即结构体较大）的匹配
-            if ratio < best_ratio || best.is_none() {
-                best_ratio = ratio;
-                best = Some((name, ty));
-            }
+/// 从 malloc 调用点 PC 查源码行，提取 (type*) 强制转换的真实类型。
+/// 例：源码 `arg->sum = (int *)malloc(dim * sizeof(int))` → 提取 "int"
+///      源码 `double *a = malloc(n*n*sizeof(double))` → 提取 "double"
+/// 返回 DWARF 中存在的基本类型名，若无法提取返回 None。
+fn infer_type_from_callsite(rec: &AllocRecord, dwarf: &DwarfInfo) -> Option<String> {
+    // stack_pcs[0] 是手动读 [rsp] 获取的调用者返回地址（用户代码 call malloc 后的 PC）。
+    // 后续 pcs[1..] 是 bpf_get_stack 的回溯结果（可能含 libc 内部地址）。
+    // 遍历找第一个能解析出源码行的 PC（即用户代码的 malloc 调用点）。
+    let mut found: Option<(u64, String, u64)> = None;
+    for &pc in &rec.stack_pcs {
+        if let Some((file_path, line)) = dwarf.pc_to_source_line(pc) {
+            found = Some((pc, file_path, line));
+            break;
         }
     }
+    let (_pc, file_path, line) = found?;
 
-    best.map(|(n, t)| (n.clone(), t))
+    // file_path 可能是相对路径（如 ../kmeans-pthread.c）或绝对路径。
+    // fsparse_a 由 Makefile 在 binary 所在目录启动（cd $(A)），故相对路径可直接读。
+    let content = std::fs::read_to_string(&file_path).ok()?;
+    let src_line = content.lines().nth((line as usize).saturating_sub(1))?;
+
+    // 正则匹配 (type *) 或 (type*) 强制转换，type 可能含 const/unsigned/long 等
+    // 常见形式：
+    //   (int *)malloc(...)
+    //   (double*)malloc(...)
+    //   (struct foo *)malloc(...)
+    //   (unsigned long *)malloc(...)
+    //   (char *)calloc(...)
+    let re = regex::Regex::new(
+        r"\(\s*(?:(const|volatile)\s+)?((?:struct\s+|union\s+)?(?:unsigned\s+|signed\s+)?(?:long\s+|short\s+)*(?:int|char|double|float|void|size_t|long|short|[A-Za-z_][A-Za-z0-9_]*)\*?)\s*\)"
+    ).ok()?;
+    let caps = re.captures(src_line)?;
+    let type_str = caps.get(2)?.as_str().trim();
+
+    // 去掉可能的尾部空格，标准化
+    let type_name = type_str.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // 确认 DWARF 中存在该类型（基本类型或结构体）
+    if dwarf.find_type_by_name(&type_name).is_some() {
+        return Some(type_name);
+    }
+
+    // 尝试去掉 "struct "/"union " 前缀再查
+    let clean = type_name
+        .trim_start_matches("struct ")
+        .trim_start_matches("union ");
+    if dwarf.find_type_by_name(clean).is_some() {
+        return Some(clean.to_string());
+    }
+
+    // 对于 "int *" 这类，DWARF 基本类型名就是 "int"
+    // type_name 可能是 "int *"，取去掉 * 的部分
+    let base = type_name.trim_end_matches('*').trim();
+    if dwarf.find_type_by_name(base).is_some() {
+        return Some(base.to_string());
+    }
+
+    None
 }
+

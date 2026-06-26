@@ -2,6 +2,10 @@
 
 基于 **Aya + gimli** 的 eBPF 内存分配追踪工具，通过 uprobe 拦截 libc 内存函数，结合 DWARF 调试信息将堆地址映射到具体结构体字段。
 
+Aya 是 eBPF 编程框架，让你能用 Rust 开发、加载和管理 eBPF 程序。
+
+Gimli 是 DWARF 调试信息解析库，让你能读取和处理编译调试信息。
+
 ## 项目概述
 
 fsparse_a 是从 memscope 项目迁移并重构的堆检测功能，使用 Rust 原生实现（脱离 memscope 独立运行），主要特性：
