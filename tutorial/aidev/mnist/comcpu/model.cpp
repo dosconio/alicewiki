@@ -15,6 +15,19 @@ void MnistModel::Forward(const MnistImage& img, float out[output_size]) const {
 	}
 }
 
+
+
+void MnistModel::Update(const MnistImage& img, const float grad[10], float lr) {
+	for0(o, output_size) {
+		bias[o] -= lr * grad[o];
+
+		for0(i, input_size) {
+			float x = img.pixel[i / 28][i % 28];
+			weight[o][i] -= lr * grad[o] * x;
+		}
+	}
+}
+
 void MnistModel::Softmax(float* x, float* out) const {
 	float maxv = x[0];
 

@@ -8,6 +8,25 @@ float CrossEntropy(const float* prob, byte label) {
 	return -std::log(prob[label] + 1e-12f);
 }
 
+float score[10];
+float prob[10];
+float grad[10];
+
+void TrainOnce(MnistModel& model, const MnistImage& img) {
+	model.Forward(img, score);
+	model.Softmax(score, prob);
+	float loss = CrossEntropy(prob, img.label);
+	//outsfmt("loss: %lf\n", (double)loss);
+
+	for0(i, 10) {
+		grad[i] = prob[i];
+	}
+	grad[img.label] -= 1.0f;
+
+	float lr = 0.01f;
+	model.Update(img, grad, lr);
+}
+
 int main() {
 	using namespace uni;
 	rostr img_filename = "../dataset/train-images.idx3-ubyte";
@@ -46,7 +65,7 @@ int main() {
 	outsfmt("label magic: %u\n", lab_magic);
 	outsfmt("label count: %u\n", lab_count);
 
-	for0(i, 100) {
+	for0(i, 110) {
 		dataset.Append(MnistImage());
 		dataset[-1].Read(img, lbl);
 	}
@@ -61,46 +80,36 @@ int main() {
 		outsfmt("[L%u] : %u\n", i, map[i]);
 	}
 
-	outsfmt("\nFirst:\n");
-	dataset[0].Dump();
-	dataset[1].Dump();
-
-	//
+	//dataset[0].Dump();
 
 	MnistModel model;
 	model.InitRandom();
 
-	float score[10];
-	float prob[10];
-	float grad[10];
+	// Train
+	// Forward, Softmax, Loss, Grad, Update
+	stduint last_match_cnt = 0;
+	for0(epoch, 5) {
+		// {} shuffle
+		for0(i, 100) {
+			TrainOnce(model, dataset[i]);
+			if ((i + 1) % 20); else {
+				ploginfo("Train %u/100", i + 1);
+			}
+		}
+		int match_cnt = 0;
+		for0(i, 10) {
+			//auto ii = i;// Test
+			auto ii = i + 100;// Wide
 
-	model.Forward(dataset[0], score);
-	model.Softmax(score, prob);
-
-	for0(i, 10) {
-		grad[i] = prob[i];
+			byte pred = model.Predict(dataset[ii]);
+			match_cnt += dataset[ii].label == pred;
+		}
+		outsfmt("epoch %u: %lf\n", epoch, (double)((double)match_cnt / 10));
+		if (last_match_cnt == match_cnt) {
+			break;
+		}
+		last_match_cnt = match_cnt;
 	}
-	grad[dataset[0].label] -= 1.0f;
-
-	outsfmt("\nProb:\n");
-	for0(i, 10) {
-		outsfmt("[%u] %lf\n", i, (double)prob[i]);
-	}
-
-	outsfmt("\nGrad:\n");
-
-	for0(i, 10) {
-		outsfmt("[%u] %f\n", i, grad[i]);
-	}
-
-	byte pred = model.Predict(dataset[0]);
-	float loss = CrossEntropy(prob, dataset[0].label);
-
-
-	outsfmt("label: %hhu\n", dataset[0].label);
-	outsfmt("pred : %hhu\n", pred);
-	outsfmt("loss: %lf\n", (double)loss);
-	
 
 	return malc_count;
 }

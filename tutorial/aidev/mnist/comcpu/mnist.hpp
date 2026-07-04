@@ -88,6 +88,8 @@ struct MnistModel {
 
 	void Forward(const MnistImage& img, float out[output_size]) const;
 
+	void Update(const MnistImage& img, const float grad[10], float lr);
+
 	void Softmax(float* x, float* out) const;
 
 	byte Predict(const MnistImage& img) const;
