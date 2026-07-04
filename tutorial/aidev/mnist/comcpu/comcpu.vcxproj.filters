@@ -18,8 +18,16 @@
     <ClCompile Include="mnist.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="model.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Library Include="..\..\..\..\..\..\bin\libw64d.lib" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="mnist.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
