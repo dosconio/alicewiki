@@ -56,19 +56,37 @@ struct MnistImage {
 	}
 };
 
+// Affine->ReLU->Affine->Softmax->
+/*
+	z1 = W1*x + b1
+	h = ReLU(z1)
+	score = W2*h + b2
+	prob = Softmax(score)
+	loss = -log(prob[label])
+*/
 struct MnistModel {
 	static const stduint input_size = 28 * 28;
+	static const stduint hidden_size = 128;
 	static const stduint output_size = 10;
 
-	float weight[output_size][input_size];
-	float bias[output_size];
+	float W1[hidden_size][input_size];
+	float b1[hidden_size];
+
+	float W2[output_size][hidden_size];
+	float b2[output_size];
 
 	void Initialize() {
-		for0(o, output_size) {
-			bias[o] = 0.0f;
-
+		for0(h, hidden_size) {
+			b1[h] = 0.0f;
 			for0(i, input_size) {
-				weight[o][i] = 0.0f;
+				W1[h][i] = 0.0f;
+			}
+		}
+
+		for0(o, output_size) {
+			b2[o] = 0.0f;
+			for0(h, hidden_size) {
+				W2[o][h] = 0.0f;
 			}
 		}
 	}
@@ -77,11 +95,17 @@ struct MnistModel {
 		std::mt19937 rng(1234);
 		std::normal_distribution<float> dist(0.0f, 0.01f);
 
-		for0(o, output_size) {
-			bias[o] = 0.0f;
-
+		for0(h, hidden_size) {
+			b1[h] = 0.0f;
 			for0(i, input_size) {
-				weight[o][i] = dist(rng);
+				W1[h][i] = dist(rng);
+			}
+		}
+
+		for0(o, output_size) {
+			b2[o] = 0.0f;
+			for0(h, hidden_size) {
+				W2[o][h] = dist(rng);
 			}
 		}
 	}

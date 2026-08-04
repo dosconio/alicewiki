@@ -23,19 +23,21 @@ volatile bool rx_frame_ready = false;
 void hand_xart1() {
 	stduint ptr = XART1.getBufferPointer();
 	if (ptr) if (_buf[ptr - 1] == '\n' || _buf[ptr - 1] == '\r') {
-		_buf[ptr - 1] = 0; // buf.Refresh();
-		rx_frame_ready = true;
+		if (ptr > 1) {
+			_buf[ptr - 1] = 0;
+			rx_frame_ready = true;
+		}
+		else {
+			XART1.ClearBuffer(); // lone delimiter (e.g. \n after \r), drop and keep receiving
+		}
 	}
 	if (ptr >= byteof(_buf)) {
-		_buf[ptr - 1];
+		_buf[byteof(_buf) - 1] = 0;
 		rx_frame_ready = true;
 	}
 	//rx_frame_ready = true;
-	if (XART1.isReady()) {
-		XART1.innByInterrupt();
-	} else {
-		XART1.error = NULL;
-		XART1.innByInterrupt();
+	if (rx_frame_ready) {
+		XART1.abortReceive();// this method will lost data at interval
 	}
 }
 
@@ -55,9 +57,9 @@ int main() {
 	XART1.rx_buffer = buf.getSlice();
 	XART1.setInterrupt(hand_xart1);
 	XART1.enInterrupt();
-	XART1.innByInterrupt();
+	XART1.Receive(_buf, byteof(_buf), IOMethod::Rupt);
 	
-	SysDelay_ms(1000);
+	SysDelay_ms(500);
 	buf.Format("Ciallo~\n");
 	XART1.OutFormat(buf.reference());
 	XART1.OutFormat("Hello, %s %s\n", "Happy", "World");
@@ -68,6 +70,7 @@ int main() {
 			XART1.OutFormat("Hello, %s\n", buf.reference());
 			XART1.ClearBuffer();
 			rx_frame_ready = false;
+			XART1.Receive(_buf, byteof(_buf), IOMethod::Rupt); 
 			continue;
         }
 		SysDelay_ms(250);

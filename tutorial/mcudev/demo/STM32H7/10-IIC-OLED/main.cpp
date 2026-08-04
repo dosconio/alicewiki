@@ -26,17 +26,24 @@ char* salc(size_t size){return 0;}
 void outtxt(const char* str, stduint len) {XART1.out(str, len);}
 }
 
+volatile bool rx_frame_ready = false;
 void hand_xart1() {
-	// while (!XART1.isReady());
-	stduint timeout = 0x1FFFF;
-	if (buf[0] == '\r') XART1.ClearBuffer();
-	if (buf[XART1.getBufferPointer() - 1] == '\n') {
-		//  assume \r\n
-		buf[XART1.getBufferPointer() - 1] = 0;
-		XART1.OutFormat("Hello, %s\n", buf.reference());
-		XART1.ClearBuffer();
+	stduint ptr = XART1.getBufferPointer();
+	if (ptr) if (_buf[ptr - 1] == '\n' || _buf[ptr - 1] == '\r') {
+		if (ptr > 1) {
+			_buf[ptr - 1] = 0;
+			rx_frame_ready = true;
+		} else {
+			XART1.ClearBuffer(); // lone delimiter (e.g. \n after \r), drop and keep receiving
+		}
 	}
-	if (XART1.isReady()) XART1.innByInterrupt();
+	if (ptr >= byteof(_buf) - 1) {
+		_buf[byteof(_buf) - 2] = 0;
+		rx_frame_ready = true;
+	}
+	if (rx_frame_ready) {
+		XART1.abortReceive();
+	}
 }
 
 void iic_delay() { for0(i,5); }
@@ -65,7 +72,7 @@ int main() {
 	// Interrupt Buffer Mode
 	XART1.rx_buffer = buf.getSlice();
 	XART1.RuptTrait::enInterrupt(hand_xart1);
-	XART1.innByInterrupt();
+	XART1.Receive(_buf, byteof(_buf) - 1, IOMethod::Rupt);
 	
 	
 	XART1.OutFormat("Hello, %s %s on %s\n", "Example", "IIC Drive OLED Screen", _IDN_BOARD);
@@ -104,6 +111,13 @@ int main() {
 	// Vcon.OutFormat("TEST Write String on multiline~"); oled.Refresh();
 	
 	while (true) {
+		if (rx_frame_ready) {
+			XART1.OutFormat("Hello, %s\n", buf.reference());
+			XART1.ClearBuffer();
+			rx_frame_ready = false;
+			XART1.Receive(_buf, byteof(_buf) - 1, IOMethod::Rupt);
+			continue;
+		}
 		static int i = 0;
 		Vcon.OutFormat("%d", i); my_oled->Refresh();
 		++i %= 10;

@@ -26,7 +26,7 @@ int main() {
 	KEYU.setMode(GPIORupt::Anyedge);
 	KEYU.setInterrupt(hand);
 	KEYU.enInterrupt();
-	while (true) HALT();
+	while (true);// HALT();
 }
 
 void erro(const char* str) {

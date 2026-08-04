@@ -5,12 +5,13 @@ byte buf[4];
 uni::Vector<MnistImage> dataset;
 
 float CrossEntropy(const float* prob, byte label) {
-	return -std::log(prob[label] + 1e-12f);
+	return -std::log(prob[label] + 1e-12f);// 1e-12f 防止 log(0)
 }
 
 float score[10];
 float prob[10];
 float grad[10];
+float lr = 0.01f;// learning rate
 
 void TrainOnce(MnistModel& model, const MnistImage& img) {
 	model.Forward(img, score);
@@ -23,9 +24,11 @@ void TrainOnce(MnistModel& model, const MnistImage& img) {
 	}
 	grad[img.label] -= 1.0f;
 
-	float lr = 0.01f;
 	model.Update(img, grad, lr);
 }
+
+MnistModel model;
+int idx[100];
 
 int main() {
 	using namespace uni;
@@ -65,7 +68,9 @@ int main() {
 	outsfmt("label magic: %u\n", lab_magic);
 	outsfmt("label count: %u\n", lab_count);
 
-	for0(i, 110) {
+	for0(i, 100) idx[i] = i;
+
+	for0(i, 120) {
 		dataset.Append(MnistImage());
 		dataset[-1].Read(img, lbl);
 	}
@@ -80,31 +85,31 @@ int main() {
 		outsfmt("[L%u] : %u\n", i, map[i]);
 	}
 
-	//dataset[0].Dump();
-
-	MnistModel model;
+	std::mt19937 rng(1234);
 	model.InitRandom();
 
 	// Train
 	// Forward, Softmax, Loss, Grad, Update
 	stduint last_match_cnt = 0;
-	for0(epoch, 5) {
-		// {} shuffle
+	for0(epoch, 10) {
+		outsfmt("\n");
+		std::shuffle(idx, idx + 100, rng);
 		for0(i, 100) {
-			TrainOnce(model, dataset[i]);
+			TrainOnce(model, dataset[idx[i]]);
 			if ((i + 1) % 20); else {
+				outsfmt("\033[A");
 				ploginfo("Train %u/100", i + 1);
 			}
 		}
 		int match_cnt = 0;
-		for0(i, 10) {
+		for0(i, 20) {
 			//auto ii = i;// Test
 			auto ii = i + 100;// Wide
 
 			byte pred = model.Predict(dataset[ii]);
 			match_cnt += dataset[ii].label == pred;
 		}
-		outsfmt("epoch %u: %lf\n", epoch, (double)((double)match_cnt / 10));
+		outsfmt("epoch %u: %lf\n", epoch, (double)((double)match_cnt / 20));
 		if (last_match_cnt == match_cnt) {
 			break;
 		}
