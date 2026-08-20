@@ -46,7 +46,7 @@ void hand_xart1() {
 	}
 }
 
-void iic_delay() { for0(i,5); }
+void iic_delay() { for(volatile int i = 0; i < 50; i++){} }
 
 
 
@@ -78,14 +78,16 @@ int main() {
 	XART1.OutFormat("Hello, %s %s on %s\n", "Example", "IIC Drive OLED Screen", _IDN_BOARD);
 	
 	byte oled_entity[byteof(OLED_t)];
+	byte oledw_entity[byteof(IIC_SOFT)];
 	OLED_t* my_oled = (OLED_t*)oled_entity;
 	
 	#define devaddr 0x78
 	if (1) // SOFT
 	{
-		GPIN& SCL = GPIOB[ 6];
-		GPIN& SDA = GPIOB[ 7];
-		IIC_SOFT oled_wire(SDA, SCL);
+		GPIN& SCL = GPIOG[13];
+		GPIN& SDA = GPIOG[14];
+		new (oledw_entity) IIC_SOFT(SDA, SCL);
+		IIC_SOFT& oled_wire = *(IIC_SOFT*)oledw_entity;
 		oled_wire.func_delay = iic_delay;
 		new (my_oled) OLED_t(devaddr, oled_wire); 
 
@@ -104,12 +106,12 @@ int main() {
 	my_oled->setOutput();
 	my_oled->Fill(0);
 	auto vci = my_oled->getControlInterface();
-	VideoConsole Vcon(vci, Size2(128 / 8, 64 / 16));
+	VideoConsole Vcon(&vci, Rectangle(Point(0, 0), Size2(128, 64)));
 	Vcon.forecolor = Color::White;
 	Vcon.OutFormat("Hello, %s %s!\n\r", "Happy", "World"); my_oled->Refresh();
 	Vcon.OutFormat("KIRAKIRA\nDOKIDOKI"); my_oled->Refresh();
 	// Vcon.OutFormat("TEST Write String on multiline~"); oled.Refresh();
-	
+	SysDelay_ms(2000);
 	while (true) {
 		if (rx_frame_ready) {
 			XART1.OutFormat("Hello, %s\n", buf.reference());
@@ -126,7 +128,7 @@ int main() {
 	}
 }
 
-void erro(char* str) {
+void erro(const char*) {
 	LEDR.setMode(GPIOMode::OUT);
 	while (true) {
 		LEDR.Toggle();

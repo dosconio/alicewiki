@@ -8,7 +8,7 @@ struct OLED_VCI_T : public uni::VideoControlInterface {
 	virtual uni::Point GetCursor() const { _TODO return uni::Point(0, 0); }
 	virtual void DrawPoint(const uni::Point& disp, uni::Color color) const;
 	virtual void DrawRectangle(const uni::Rectangle& rect) const;
-	virtual void DrawFont(const uni::Point& disp, const uni::DisplayFont& font) const { _TODO }
+	virtual void DrawFont(const uni::Point& disp, const uni::DisplayFont& font, const uni::String& str) const { _TODO }
 	virtual uni::Color GetColor(uni::Point p) const;
 };
 

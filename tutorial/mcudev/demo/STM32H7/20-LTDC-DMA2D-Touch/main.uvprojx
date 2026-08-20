@@ -324,14 +324,14 @@
             <PlainCh>1</PlainCh>
             <Ropi>0</Ropi>
             <Rwpi>0</Rwpi>
-            <wLevel>1</wLevel>
+            <wLevel>3</wLevel>
             <uThumb>0</uThumb>
             <uSurpInc>0</uSurpInc>
             <uC99>1</uC99>
             <uGnu>1</uGnu>
             <useXO>0</useXO>
-            <v6Lang>6</v6Lang>
-            <v6LangP>9</v6LangP>
+            <v6Lang>3</v6Lang>
+            <v6LangP>8</v6LangP>
             <vShortEn>1</vShortEn>
             <vShortWch>1</vShortWch>
             <v6Lto>0</v6Lto>
@@ -391,9 +391,9 @@
               <FilePath>.\main.cpp</FilePath>
             </File>
             <File>
-              <FileName>OLED.cpp</FileName>
+              <FileName>GT9147.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\..\..\devsrc\OLED.cpp</FilePath>
+              <FilePath>..\..\..\devsrc\GT9147.cpp</FilePath>
             </File>
           </Files>
         </Group>

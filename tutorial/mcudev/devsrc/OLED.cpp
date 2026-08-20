@@ -36,7 +36,8 @@ void OLED_t::setOutput() {
 }
 
 uni::VideoControlBlock OLED_t::getControlBlock() {
-	return uni::VideoControlBlock(getControlInterface(), uni::Size2(128, 64), uni::Color::Black);
+	OLED_VCI_T vci(this);
+	return uni::VideoControlBlock(&vci, uni::Rectangle(uni::Point(0, 0), uni::Size2(128, 64)));
 }
 
 void OLED_VCI_T::SetCursor(const uni::Point& disp) const {
