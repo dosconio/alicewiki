@@ -2,6 +2,7 @@
 #include <cpp/Device/IIC>
 #include <cpp/Device/GPIO>
 #include <cpp/Device/SysTick>
+#include <cpp/Device/_Touch.hpp>
 
 #include "../device/GT9147.h"
 
@@ -42,7 +43,7 @@ bool GT9147_t::readReg(uint16 reg, byte* buf, byte len) {
 }
 
 // 初始化：INT 上拉输入 → RST 复位脉冲 → INT 浮空 → 读 PID → 软复位（照 HAL GT9147_Init）
-bool GT9147_t::init() {
+bool GT9147_t::Initialize() {
 	intn.setMode(GPIOMode::IN_Pull).setPull(true);
 	rst.setMode(GPIOMode::OUT_PushPull);
 	rst = false;// 复位
@@ -75,7 +76,7 @@ bool GT9147_t::init() {
 }
 
 // 扫描：读 GSTID → 清标志 → 逐点读 4 字节（X低 X高 Y低 Y高）→ 横屏坐标映射（照 HAL GT9147_Scan）
-byte GT9147_t::scan() {
+byte GT9147_t::Scan() {
 	byte sta = 0;
 	readReg(GT_REG_GSTID, &sta, 1);
 	byte cnt = sta & 0x0F;

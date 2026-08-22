@@ -3,6 +3,7 @@
 #include <cpp/Device/LTDC>
 #include <cpp/Device/FMC>
 #include <cpp/Device/GPU>
+#include <cpp/Device/_Touch.hpp>
 #include <c/data.h>
 #include "../../../device/GT9147.h"
 extern "C" char _IDN_BOARD[16] {"STM32H743IIT6"};
@@ -287,18 +288,84 @@ static void ltdc_fill_white(pureptr_t fb) {
 	DMA2D.Transfer((pureptr_t)uint32(Color::White), fb, 800, 480);
 }
 
+// ---- 触摸事件架构（驱动层 INT 回调 + 框架层 Sheet 事件集成）----
+// ISR：驱动层入口（只置标志 + 调回调，绝不做 I2C 扫描）
+static GT9147_t* g_tp = nullptr;
+static uni::TouchControlBlock* g_touchblk = nullptr;
+static void TP_ISR() { if (g_tp) g_tp->HandleInterrupt(); }
+// 驱动层回调 → 框架层事件泵（主循环 Process 消费）
+static void touchblk_trigger() { if (g_touchblk) g_touchblk->HandleInterrupt(); }
+
+// 画板 Sheet：接收框架层按点派发的事件（onClick/onMoved/onLeave，最后变参 = 稳定手指身份 track id）。
+// 每指独立维护上次坐标，onMoved 时从上次位置连线；按下即记录起点（照 HAL ctp_test）。
+class PaintSheet : public uni::SheetTrait {
+public:
+	uint16 last_x[5], last_y[5];// 各指上次坐标（用于连线）
+	bool last_valid[5] = { false, false, false, false, false };// 各指按压有效标记
+public:
+	virtual void doshow(void*) override {}// 无独立缓冲：直接写显示帧缓冲
+	virtual void onrupt(uni::SheetEvent event, uni::Point rel_p, ...) override {
+		para_list args;
+		para_ento(args, rel_p);
+		byte idx;
+		if (event == uni::SheetEvent::onMoved) {// onMoved 共 3 个变参：压力、半径、track id
+			(void)para_next(args, int);// 压力
+			(void)para_next(args, int);// 半径
+			idx = (byte)para_next(args, int);// track id
+		} else {// onClick 2 个变参：(RML字节, track id)；onLeave 2 个变参：(类型, track id)
+			(void)para_next(args, int);// RML 字节 / 类型
+			idx = (byte)para_next(args, int);// track id
+		}
+		para_endo(args);
+		if (idx >= 5) return;
+		if (event == uni::SheetEvent::onClick) {// 按下：记录起点；右上角 RST 区则清屏
+			last_x[idx] = rel_p.x; last_y[idx] = rel_p.y;
+			last_valid[idx] = true;
+			if (rel_p.x > 800 - 24 && rel_p.y < 20) {// 照 HAL Load_Drow_Dialog
+				ltdc_fill_white((pureptr_t)LCD_FB0_ADDR);
+#if LCD_DOUBLE_BUFFER
+				ltdc_fill_white((pureptr_t)LCD_FB1_ADDR);
+#endif
+				for (byte k = 0; k < 5; k++) last_valid[k] = false;
+				return;
+			}
+			XART1.OutFormat("X:%d,Y:%d\r\n", rel_p.x, rel_p.y);
+		}
+		else if (event == uni::SheetEvent::onMoved) {// 移动：从上次位置连线到当前点
+			if (last_valid[idx])
+				ltdc_line_fb(_fb_back, last_x[idx], last_y[idx], rel_p.x, rel_p.y, touch_colors[idx]);
+			last_x[idx] = rel_p.x; last_y[idx] = rel_p.y;
+			XART1.OutFormat("X:%d,Y:%d\r\n", rel_p.x, rel_p.y);
+		}
+		else if (event == uni::SheetEvent::onLeave) {// 抬起：断开该指连线
+			last_valid[idx] = false;
+		}
+	}
+};
+
 // 【预期现象】（APOLLO STM32H7 + 4.3寸 800x480 RGB 电容屏）
 // ① 上电后屏幕显示白底 + 红字标题（STM32H7 / Alice.Wiki 20-LTDC-DMA2D-Touch /
 //    @ArinaMgk / Touch Paint Board / RST corner to clear），稳定不闪烁。
 // ② 串口依次打印：APOLLO STM32H7 → LTDC-DMA2D-TOUCH TEST → SDRAM OK →
-//    LTDC OK, PixClk=33333334Hz → TP init... → GT9147 OK；之后每帧打印触摸坐标 X:..,Y:..
+//    LTDC OK, PixClk=33333334Hz → TP init... → GT9147 OK；之后每次触摸
+//    按下/移动打印坐标 X:..,Y:..
 // ③ 手指在屏上滑动画出彩色笔迹并保留（最多 5 指，各指一色：红/绿/蓝/棕/GRED）。
 // ④ 点击屏幕右上角约 24x20 的 RST 区，整屏清为白底。
 // ⑤ DS0（LEDB）闪烁指示程序运行。
+// 触摸事件架构（本次实现）：
+//   - 驱动层：GT9147 INT 脚 PH7 接 EXTI（Anyedge），ISR 只调 GT9147_t::HandleInterrupt()
+//     （置 touch_pending + 调 InterruptCallback），不做 I2C；
+//   - 框架层：驱动回调触发 TouchControlBlock::HandleInterrupt()（置 pending），
+//     主循环 TouchControlBlock::Process() 消费：扫描 → 位置最近邻匹配出稳定 track id
+//     （按下 onClick / 移动 onMoved / 抬起 onLeave，最后变参带 track id）→
+//     LayerManager::getTop 找到点所在顶层 Sheet → onrupt 派发；
+//   - 本画板以 PaintSheet 接收事件，每指独立连线。
 // 说明：
 //   - 触摸芯片兼容 GT911 / GT9147 / GT1158 / GT9271（照 HAL，本板实测为 GT1158）。
 //   - 单缓冲直写，快速画线时偶有轻微撕裂属正常现象（HAL 同款方案）。
 //   - 若串口停在 TP init FAIL，按打印的 ACK_stage / PID 排查触摸 I2C。
+//   - 若 INT 脚异常（EXTI 不停触发/画板无反应），可把 touchblk.use_interrupt 置 false
+//     退回轮询模式（此时 Process 每次调用都扫描），对照排查硬件接线。
 
 int main() {
 	L1C.enAbleICacheAll();// 只开 I-Cache；D-Cache 关闭，CPU 写帧缓冲直达 SDRAM，LTDC 立即可见
@@ -345,38 +412,28 @@ int main() {
 	TouchIIC touch_iic(GPIOI[3], GPIOH[6]);// SDA=PI3, SCL=PH6（push_pull 模式）
 	touch_iic.func_delay = iic_delay;
 	GT9147_t tp(touch_iic, GPIOI[8], GPIOH[7]);// RST=PI8, INT=PH7
-	if (!tp.init()) {
+	if (!tp.Initialize()) {
 		XART1.OutFormat("TP init FAIL: ACK_stage=%d PID=%02X%02X%02X%02X\r\n",
 			tp.dbg_ack_stage, tp.dbg_pid[0], tp.dbg_pid[1], tp.dbg_pid[2], tp.dbg_pid[3]);
 		erro("GT9147 init fail");
 	}
 	XART1.OutFormat("GT9147 OK\r\n");
 
-	// 各指上次坐标（用于连线）与有效标记
-	static uint16 last_x[5], last_y[5];
-	static bool last_valid[5] = { false, false, false, false, false };
+	// ---- 触摸事件架构接线：PH7 接 EXTI（Anyedge）→ 驱动 HandleInterrupt → 框架层 HandleInterrupt → 主循环 Process ----
+	PaintSheet paintsheet;
+	uni::LayerManager layman;
+	layman.Append(&paintsheet);
+	paintsheet.InitializeSheet(layman, uni::Point(0, 0), uni::Size2(800, 480));
+	uni::TouchControlBlock touchblk(&tp, &layman);
+	g_tp = &tp;
+	g_touchblk = &touchblk;
+	tp.InterruptCallback = &touchblk_trigger;// 驱动层回调 → 框架层事件泵
+	GPIOH[7].setMode(GPIOMode::IN_Pull).setPull(true);// INT 先配上拉输入（查询/等待高电平）
+	GPIOH[7].setMode(GPIORupt::Anyedge, &TP_ISR);// 再挂 EXTI 边沿中断（保持输入模式）
+	GPIOH[7].enInterrupt(true);// 使能 NVIC（EXTI7 属 EXTI9_5_IRQn）——setMode(edg,f) 不代开 NVIC
 
 	while (true) {
-		byte cnt = tp.scan();
-		if (cnt) {
-			for (byte i = 0; i < cnt && i < 5; i++) {
-				uint16 tx = tp.x[i], ty = tp.y[i];
-				if (tx < 800 && ty < 480) {// 坐标合法
-					if (tx > 800 - 24 && ty < 20) {// 右上角 RST 区：清屏（照 HAL Load_Drow_Dialog）
-						ltdc_fill_white((pureptr_t)LCD_FB0_ADDR);
-						ltdc_fill_white((pureptr_t)LCD_FB1_ADDR);
-						for (byte k = 0; k < 5; k++) last_valid[k] = false;
-					} else {
-						if (last_valid[i]) ltdc_line_fb(_fb_back, last_x[i], last_y[i], tx, ty, touch_colors[i]);
-						last_x[i] = tx; last_y[i] = ty; last_valid[i] = true;
-					}
-				}
-			}
-			// 串口打印首指坐标（两者都要）
-			XART1.OutFormat("X:%d,Y:%d\r\n", tp.x[0], tp.y[0]);
-		} else {
-			for (byte i = 0; i < 5; i++) last_valid[i] = false;// 全部松开，断开连线
-		}
+		touchblk.Process();// INT 触发才扫描（use_interrupt=true），扫描后按点状态机派发 Sheet 事件
 		lcd_swap();// 双缓冲：垂直消隐期切换层地址
 		LEDB.Toggle();// DS0 指示运行
 		SysDelay_ms(5);
