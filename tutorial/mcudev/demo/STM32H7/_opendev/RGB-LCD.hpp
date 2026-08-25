@@ -8,9 +8,8 @@
 #include <cpp/MCU/ST/STM32H7>
 #include <cpp/Device/LTDC>
 #include <cpp/Device/FMC>
+#include "SDRAM.hpp"// 提供 void sdram_init();（定义于 SDRAM.cpp）
 
-// 初始化 SDRAM（帧缓冲）
-void sdram_init();
 // 初始化 SDRAM（帧缓冲）与 LTDC（引脚/像素时钟/时序/层），点亮背光
 void ltdc_init();
 // 在指定位置以红色 16x8 点阵输出一行文本
