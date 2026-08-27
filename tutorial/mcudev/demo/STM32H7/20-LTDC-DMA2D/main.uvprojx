@@ -390,6 +390,16 @@
               <FileType>8</FileType>
               <FilePath>.\main.cpp</FilePath>
             </File>
+            <File>
+              <FileName>RGB-LCD.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\_opendev\RGB-LCD.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>SDRAM.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\_opendev\SDRAM.cpp</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

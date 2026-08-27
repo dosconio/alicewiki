@@ -19,6 +19,8 @@
 
 16-SDRAM DDR
 17-EEPROM
+18-Flash-NOR
+18-Flash-NAND
 
 20-LTDC ---- 依赖于 DDR/SDRAM
 20-LTDC-DMA2D
@@ -30,4 +32,13 @@
 41-iWDog
 42-wWDog
 43-RNG
+
+50-MPU
+51-Power
+
+90-KanjiFont
+91-ImageShow
+92-AudioPlay
+93-VideoPlay
+99-MecocoaRTOS
 
