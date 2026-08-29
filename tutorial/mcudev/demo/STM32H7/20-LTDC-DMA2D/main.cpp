@@ -133,7 +133,6 @@ static void dma2d_prepare_block() {
 
 // 显示标题文本到后台缓冲（基线条目 + 当前演示名）
 static void ltdc_texts(const char* phase_name) {
-	ltdc_text_fb(_fb_back, 10, 40, "STM32H7");
 	ltdc_text_fb(_fb_back, 10, 80, "Alice.Wiki 20-LTDC-DMA2D");
 	ltdc_text_fb(_fb_back, 10, 110, "@ArinaMgk");
 	ltdc_text_fb(_fb_back, 10, 150, __DATE__);
@@ -188,10 +187,8 @@ int main() {
 			if (blit_x <= 0 || blit_x + BLOCK_SIZE >= 800) { blit_vx = -blit_vx; blit_x += blit_vx; }
 			if (blit_y <= 0 || blit_y + BLOCK_SIZE >= 480) { blit_vy = -blit_vy; blit_y += blit_vy; }
 			DMA2D.setMode(DMA2DMode::M2M, PixelFormat::RGB565);
-			DMA2D[DMA2DReg::FGOR] = 0;// 源行偏移 0：连续 64×64 源，每行 64 像素后连续读下一行
 			DMA2D.Transfer((pureptr_t)_buf_block,
 				(pureptr_t)(_IMM(_fb_back) + (blit_y * LCD_FB_STRIDE + blit_x) * 2), BLOCK_SIZE, BLOCK_SIZE, LCD_FB_STRIDE);
-				// 目标行宽 800：Transfer 自动设 OOR=800-64=736，64 行铺成 64×64 方块
 			ltdc_texts("DMA2D M2M BLIT");
 		} break;
 		case 2: {

@@ -1,5 +1,17 @@
 // ASCII CPP-ISO11 TAB4 CRLF
 /*
+|普通 `WFI`（SLEEPDEEP=0）|`setMode(PWRMode::STANDBY)`|
+|---|---|
+|进入的模式|SLEEP（浅睡眠）|STANDBY（最深待机）|
+|做的事|只执行 `wfi`，CPU 暂停|设 PDDS_D1/D2/D3=1 + SCR.SLEEPDEEP + `wfi`|
+|供电|保持（VCORE 不断电）|VCORE 断电|
+|时钟|继续/按需|全部停|
+|SRAM/寄存器|保留|丢失|
+|唤醒|任意中断/事件，代码从 `wfi` 后继续|仅 WKUP/RTC/IWDG/NRST，**复位重启** main|
+|唤醒后|不复位，继续执行|复位（POR 式），重跑 main|
+
+*/
+/*
  * 51-Power：待机唤醒实验（PWR STANDBY + WKUP 唤醒）
  *
  * 预期现象：
@@ -15,6 +27,7 @@
 #define _DEBUG
 #include <cpp/MCU/ST/STM32H7>
 #include <c/driver/RealtimeClock.h>
+#include <cpp/Device/DBG>
 extern "C" char _IDN_BOARD[16] {"STM32H743IIT6"};
 
 using namespace uni;
@@ -68,6 +81,10 @@ int main() {
 
 	// 禁用 RTC 唤醒源，避免待机后被 RTC 唤醒
 	disable_rtc_wakeup();
+
+	// 待机调试保留：进待机后保持 JTAG/SWD 连接，可继续调试/烧录
+	DBGMCU.enDBGStandby(true);         // Domain1 待机调试（DBGMCU_CR.STANDBYD1）
+	DBGMCU.enDBGStandbyDomain3(true);  // Domain3 待机调试（保持 SWD 口）
 
 	// 进入待机（PDDS_D1/D2/D3=1 + SLEEPDEEP + WFI）
 	PWR.setMode(PWRMode::STANDBY);

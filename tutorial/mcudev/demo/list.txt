@@ -36,6 +36,7 @@
 50-MPU
 51-Power
 
+80-Memman
 90-KanjiFont
 91-ImageShow
 92-AudioPlay
