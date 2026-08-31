@@ -21,13 +21,17 @@
 #include <cpp/Device/GPU>
 #include <c/format/filesys/FAT.h>
 #include <c/format/picture/JPEG.h>
+#include <c/format/picture/PNG.h>
+#include <c/format/picture/BMP.h>
 #include <c/mempool.h>
-#include <stdarg.h>
-#include <new>
+#include <cpp/Device/DBG>
 #include "../_opendev/RGB-LCD.hpp"
 extern "C" char _IDN_BOARD[16] {"STM32H743IIT6"};
 
 using namespace uni;
+
+
+extern uni::Mempool mempool;
 
 // 板载外设
 GPIN& LEDB = GPIOB[ 0];// DS0
@@ -37,24 +41,14 @@ GPIN& KEYL = GPIOC[13];// Left (KEY2)
 GPIN& KEYD = GPIOH[ 2];// Down (KEY1)
 GPIN& KEYR = GPIOH[ 3];// Right(KEY0)
 
-// 字符串 / 输出桩
-char* StrHeap(const char* valit_str){return (char*)valit_str;}
-char* StrHeapAppendChars(char* dest, char chr, size_t n){return dest + n + chr;}
-char* salc(size_t size){return 0;}
 void outtxt(const char* str, stduint len) {XART1.out(str, len);}
 
 // 内存管理：使用成熟 Mempool（c/mempool.h），管理外部 SDRAM 切片。
 // 注意：LTDC 帧缓冲占用 SDRAM_BANK1_BASE 起的 ~0xC0000 字节，Mempool 切片避开。
 // Mempool 本身是 trait::Malloc 的子类，可直接作为 JPEGCodecHard::Decode 的分配器。
-Mempool mempool;
 // operator new 必须返回最大对齐地址（8 字节），否则对象被非对齐访问会 bus fault。
 // Mempool 的 alignment 是 2 的指数：3 -> 2^3 = 8 字节对齐。
-void* operator new(size_t size)              { return mempool.allocate(size, 3, 0); }
-void* operator new[](size_t size)            { return mempool.allocate(size, 3, 0); }
-void  operator delete(void* p)        noexcept { mempool.deallocate(p, 0); }
-void  operator delete[](void* p)      noexcept { mempool.deallocate(p, 0); }
-void  operator delete(void* p, size_t) noexcept { mempool.deallocate(p, 0); }
-void  operator delete[](void* p, size_t) noexcept { mempool.deallocate(p, 0); }
+
 
 // Mempool 管理的内存切片（照 80-Memman：SDRAM + SRAM12 + SRAM4，不用 AXI/ITCM）。
 // 避开 LTDC 帧缓冲（SDRAM_BANK1_BASE 起 ~0xC0000）与下方 FAT 缓冲（+0x100000 起 1KB）。
@@ -88,8 +82,9 @@ static void on_seg(void* is_dir, ...) {
 	if (len < 4) return;
 	const char* ext = nm + len - 4;
 	// XART1.OutFormat("  ext: '%s'\r\n", ext);
-	// 只收集 .jpg/.jpeg（不区分大小写，FAT 短名为大写如 .JPG）
-	if (StrCompareInsensitive(ext, ".jpg") && StrCompareInsensitive(ext, ".jpeg")) return;
+	// 只收集 .jpg/.jpeg/.png/.bmp（不区分大小写，FAT 短名为大写如 .JPG）
+	if (StrCompareInsensitive(ext, ".jpg") && StrCompareInsensitive(ext, ".jpeg") &&
+		StrCompareInsensitive(ext, ".png") && StrCompareInsensitive(ext, ".bmp")) return;
 	// XART1.OutFormat("  -> jpg\r\n");
 	if (pic_count >= MAX_PIC) return;
 	char* full = (char*)mempool.allocate(len + 2);
@@ -110,6 +105,12 @@ static stduint collect_jpg(FilesysFAT& fs) {
 	return pic_count;
 }
 
+// ---- 按键中断（EXTI）回调：只置事件标志，处理放主循环 ----
+static volatile byte key_event = 0;
+static void on_key_next() { key_event = 1; }// KEYR：下一张
+static void on_key_prev() { key_event = 2; }// KEYL：上一张
+static void on_key_enum(){ key_event = 3; }// KEYU：重新枚举
+
 int main() {
 	L1C.enAble();// I+D cache 全开（照 20-LTDC-DMA2D：SDRAM + LTDC + DMA2D 场景）
 	NVIC.setPriorityGroup(2);
@@ -128,12 +129,29 @@ int main() {
 	KEYD.setMode(GPIOMode::IN_Pull).setPull( true);
 	KEYR.setMode(GPIOMode::IN_Pull).setPull( true);
 
+	// 按键改中断方式（照 doc-qrs/gpio.md）：KEYR/KEYL 按下为低(下降沿)，KEYU 按下为高(上升沿)
+	KEYR.setMode(GPIORupt::Negedge, on_key_next);
+	KEYR.setInterruptPriority(2, 0);
+	KEYR.enInterrupt();
+	KEYL.setMode(GPIORupt::Negedge, on_key_prev);
+	KEYL.setInterruptPriority(2, 0);
+	KEYL.enInterrupt();
+	KEYU.setMode(GPIORupt::Posedge, on_key_enum);
+	KEYU.setInterruptPriority(2, 0);
+	KEYU.enInterrupt();
+
 	XART1.setMode(115200);
 	XART1.OutFormat("ImageShow TEST\r\n");
 
 	sdram_init();
 	ltdc_init();
 	XART1.OutFormat("LTDC OK\r\n");
+
+	DBGMCU.enDBGStandby(true);         // Domain1 待机调试（DBGMCU_CR.STANDBYD1）
+	DBGMCU.enDBGStandbyDomain3(true);  // Domain3 待机调试（保持 SWD 口）
+
+	// 启动时清屏（帧缓冲填黑，清掉背景残留乱码）
+	LTDC[1].DrawRectangle(GrafRect(0, 0, LCD_W, LCD_H, Color::Black));
 
 	// SD 卡初始化
 	if (!SDCard1.setMode()) {
@@ -160,11 +178,15 @@ int main() {
 
 	stduint cur = 0;
 	JPEGCodecHard hw(JPEG);// 硬件 JPEG codec（用户注入 JPEG 对象）
+	JPEGCodec soft;// 软件 JPEG codec（硬件失败时回退）
+	PNGCodec png;// 软件 PNG codec
+	BMPCodec bmp;// 软件 BMP codec
 	ImageDecodeOptions dopt;
 	ImageDecodeOptionsInit(dopt);
 	dopt.preferredFormat = PixelFormat::RGB565;// 输出 RGB565（对齐 LTDC 层）
 
 	while (true) {
+		LTDC[1].DrawRectangle(GrafRect(0, 0, LCD_W, LCD_H, Color::Black));
 		// 读取当前图片文件
 		FAT_FileHandle fh;
 		FilesysSearchArgs sargs{};
@@ -179,29 +201,47 @@ int main() {
 			stduint rd = fs.readfl(fh2, Slice{0, fsize}, fdata);
 			XART1.OutFormat("read %s %uB\r\n", pic_name[cur], (unsigned)rd);
 
-			// 硬件解码
+			// 硬件解码，失败则回退软件 JPEG 解码
 			ImageBuffer out;
 			ImageBufferClear(out);
 			MemoryBlockDevice mem(Slice{ (stduint)fdata, rd }, sector_buf, 1);
-			ImageResult r = hw.Decode(mem, out, mempool, dopt);
+			ImageResult r;
+			stduint nlen = StrLength(pic_name[cur]);
+			const char* ext = pic_name[cur] + nlen - 4;
+			if (StrCompareInsensitive(ext, ".png") == 0) {
+				r = png.Decode(mem, out, mempool, dopt);
+			} else if (StrCompareInsensitive(ext, ".bmp") == 0) {
+				r = bmp.Decode(mem, out, mempool, dopt);
+			} else {
+				// 硬件 JPEG，失败则回退软件 JPEG
+				r = hw.Decode(mem, out, mempool, dopt);
+				if (r != ImageResult::OK || !out.pixels) {
+					ImageBufferFree(out);
+					XART1.OutFormat("hw FAIL %d -> soft\r\n", (int)r);
+					r = soft.Decode(mem, out, mempool, dopt);
+				}
+			}
 			if (r == ImageResult::OK && out.pixels) {
 				// 超屏图片直接跳过不显示（暂不做缩放）
 				if (out.width > LCD_W || out.height > LCD_H) {
 					XART1.OutFormat("skip %ux%u (too large)\r\n", (unsigned)out.width, (unsigned)out.height);
-					if (out.allocator) out.allocator->deallocate(out.pixels, out.size);
+					ImageBufferFree(out);
 				} else {
-					// 直接写 SDRAM 帧缓冲（RGB565），居中显示
+					// 写 SDRAM 帧缓冲（居中显示），支持硬件 RGB565 或软件 ARGB8888
 					stduint ox = (LCD_W - out.width) / 2, oy = (LCD_H - out.height) / 2;
-					uint16* px = (uint16*)out.pixels;
+					Color* px32 = (Color*)out.pixels;
+					uint16* px16 = (uint16*)out.pixels;
 					for (stduint y = 0; y < out.height; y++) {
 						uint16* dst = LCD_FB + (oy + y) * LCD_W + ox;
 						for (stduint x = 0; x < out.width; x++) {
-							dst[x] = px[y * out.width + x];
+							if (out.format == PixelFormat::RGB565)
+								dst[x] = px16[y * out.width + x];
+							else
+								dst[x] = px32[y * out.width + x].ToRGB565();
 						}
 					}
 					XART1.OutFormat("show %ux%u\r\n", (unsigned)out.width, (unsigned)out.height);
-					// 释放解码缓冲
-					if (out.allocator) out.allocator->deallocate(out.pixels, out.size);
+					ImageBufferFree(out);
 				}
 			} else {
 				XART1.OutFormat("decode FAIL %d\r\n", (int)r);
@@ -210,15 +250,13 @@ int main() {
 			mempool.deallocate(fdata, fsize + 1);
 		}
 
-		// 按钮切换
+		// 等待按键中断事件（回调已置 key_event），空转等待
 		LEDB.Toggle();
-		stduint key = 0;
-		while (true) {
-			if (!KEYR) { key = 1; break; }// 下一张
-			if (!KEYL) { key = 2; break; }// 上一张
-			if (KEYU)  { key = 3; break; }// 重新枚举（WK_UP 高有效）
-			SysDelay_ms(10);
+		while (key_event == 0) {
+			SysDelay_ms(10, true);
 		}
+		stduint key = key_event;
+		key_event = 0;
 		if (key == 1) { cur = (cur + 1 < pic_count) ? cur + 1 : 0; }
 		else if (key == 2) { cur = (cur > 0) ? cur - 1 : pic_count - 1; }
 		else if (key == 3) { collect_jpg(fs); XART1.OutFormat("%u JPG\r\n", (unsigned)pic_count); if (pic_count) cur = 0; }
