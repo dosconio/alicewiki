@@ -68,6 +68,47 @@ static stduint pic_count = 0;                           // 图片数量
 #define LCD_H 480
 #define LCD_FB ((uint16*)FMC_SDRAM_BANK1_BASE)
 
+// 基于 FAT 的按块读取 StorageTrait：不把整个文件读进内存，按需 readfl 一个 block。
+class FileBlockDevice : public StorageTrait {
+private:
+	FilesysFAT* fs;
+	void* file_handle;
+	stduint m_size;
+public:
+	FileBlockDevice(FilesysFAT& f, void* fh, stduint size, stduint blockSize = 512)
+		: fs(&f), file_handle(fh), m_size(size) {
+		Block_Size = blockSize;
+		readable = true;
+		writable = false;
+	}
+
+	bool Read(stduint BlockIden, void* Dest) override {
+		if (BlockIden >= getUnits()) return false;
+		stduint off = BlockIden * Block_Size;
+		if (off >= m_size) return false;
+		stduint want = Block_Size;
+		if (off + want > m_size) want = m_size - off;
+		stduint rd = fs->readfl(file_handle, Slice{ off, want }, (byte*)Dest);
+		return rd == want;
+	}
+
+	bool Write(stduint BlockIden, const void* Sors) override {
+		(void)BlockIden; (void)Sors;
+		return false;
+	}
+
+	stduint getUnits() override {
+		return (m_size + Block_Size - 1) / Block_Size;
+	}
+
+	int operator[](uint64 bytid) override {
+		if (bytid >= m_size) return -1;
+		byte b = 0;
+		if (fs->readfl(file_handle, Slice{ (stduint)bytid, 1 }, &b) == 1) return b;
+		return -1;
+	}
+};
+
 // 枚举回调：_tocall_ft 是变参函数指针，FAT 按 (is_dir, name) 两参调用（见 FAT.cpp:531）
 // C++ 中 lambda/普通函数不能隐式转变参函数指针，故用真正的变参函数。
 static void on_seg(void* is_dir, ...) {
@@ -129,7 +170,6 @@ int main() {
 	KEYD.setMode(GPIOMode::IN_Pull).setPull( true);
 	KEYR.setMode(GPIOMode::IN_Pull).setPull( true);
 
-	// 按键改中断方式（照 doc-qrs/gpio.md）：KEYR/KEYL 按下为低(下降沿)，KEYU 按下为高(上升沿)
 	KEYR.setMode(GPIORupt::Negedge, on_key_next);
 	KEYR.setInterruptPriority(2, 0);
 	KEYR.enInterrupt();
@@ -149,9 +189,6 @@ int main() {
 
 	DBGMCU.enDBGStandby(true);         // Domain1 待机调试（DBGMCU_CR.STANDBYD1）
 	DBGMCU.enDBGStandbyDomain3(true);  // Domain3 待机调试（保持 SWD 口）
-
-	// 启动时清屏（帧缓冲填黑，清掉背景残留乱码）
-	LTDC[1].DrawRectangle(GrafRect(0, 0, LCD_W, LCD_H, Color::Black));
 
 	// SD 卡初始化
 	if (!SDCard1.setMode()) {
@@ -196,15 +233,12 @@ int main() {
 			XART1.OutFormat("open %s FAIL\r\n", pic_name[cur]);
 		} else {
 			stduint fsize = (stduint)fh.size;
-			if (fsize > 512 * 1024) fsize = 512 * 1024;// 上限 512KB
-			byte* fdata = (byte*)mempool.allocate(fsize + 1);
-			stduint rd = fs.readfl(fh2, Slice{0, fsize}, fdata);
-			XART1.OutFormat("read %s %uB\r\n", pic_name[cur], (unsigned)rd);
+			XART1.OutFormat("open %s %uB\r\n", pic_name[cur], (unsigned)fsize);
 
-			// 硬件解码，失败则回退软件 JPEG 解码
+			// 按块读取（不整文件进内存），解码器按需 readfl
 			ImageBuffer out;
 			ImageBufferClear(out);
-			MemoryBlockDevice mem(Slice{ (stduint)fdata, rd }, sector_buf, 1);
+			FileBlockDevice mem(fs, fh2, fsize, 512);
 			ImageResult r;
 			stduint nlen = StrLength(pic_name[cur]);
 			const char* ext = pic_name[cur] + nlen - 4;
@@ -222,35 +256,33 @@ int main() {
 				}
 			}
 			if (r == ImageResult::OK && out.pixels) {
-				// 超屏图片直接跳过不显示（暂不做缩放）
-				if (out.width > LCD_W || out.height > LCD_H) {
-					XART1.OutFormat("skip %ux%u (too large)\r\n", (unsigned)out.width, (unsigned)out.height);
-					ImageBufferFree(out);
-				} else {
-					// 写 SDRAM 帧缓冲（居中显示），支持硬件 RGB565 或软件 ARGB8888
-					stduint ox = (LCD_W - out.width) / 2, oy = (LCD_H - out.height) / 2;
-					Color* px32 = (Color*)out.pixels;
-					uint16* px16 = (uint16*)out.pixels;
-					for (stduint y = 0; y < out.height; y++) {
-						uint16* dst = LCD_FB + (oy + y) * LCD_W + ox;
-						for (stduint x = 0; x < out.width; x++) {
-							if (out.format == PixelFormat::RGB565)
-								dst[x] = px16[y * out.width + x];
-							else
-								dst[x] = px32[y * out.width + x].ToRGB565();
+				// 保持宽高比算目标尺寸，再用库最近邻缩放，最后居中写帧缓冲
+				stduint dst_w = 0, dst_h = 0;
+				PictureOperation::FitAspect(out.width, out.height, LCD_W, LCD_H, dst_w, dst_h);
+
+				ImageBuffer scaled;
+				ImageBufferClear(scaled);
+				r = PictureOperation::ScaleNearest(out, scaled, dst_w, dst_h, PixelFormat::RGB565, mempool);
+				if (r == ImageResult::OK && scaled.pixels) {
+					uint16* px = (uint16*)scaled.pixels;
+					stduint ox = (LCD_W > dst_w) ? (LCD_W - dst_w) / 2 : 0;
+					stduint oy = (LCD_H > dst_h) ? (LCD_H - dst_h) / 2 : 0;
+					for (stduint dy = 0; dy < dst_h; dy++) {
+						uint16* dst = LCD_FB + (oy + dy) * LCD_W + ox;
+						for (stduint dx = 0; dx < dst_w; dx++) {
+							dst[dx] = px[dy * dst_w + dx];
 						}
 					}
-					XART1.OutFormat("show %ux%u\r\n", (unsigned)out.width, (unsigned)out.height);
-					ImageBufferFree(out);
+					XART1.OutFormat("show %ux%u -> %ux%u\r\n",
+						(unsigned)out.width, (unsigned)out.height, (unsigned)dst_w, (unsigned)dst_h);
+					ImageBufferFree(scaled);
 				}
+				ImageBufferFree(out);
 			} else {
 				XART1.OutFormat("decode FAIL %d\r\n", (int)r);
 			}
-			// 释放读入的 JPEG 文件缓冲（decode 内部会自己拷贝一份 stream）
-			mempool.deallocate(fdata, fsize + 1);
 		}
-
-		// 等待按键中断事件（回调已置 key_event），空转等待
+		key_event = 0;// 反复消抖
 		LEDB.Toggle();
 		while (key_event == 0) {
 			SysDelay_ms(10, true);
@@ -260,6 +292,7 @@ int main() {
 		if (key == 1) { cur = (cur + 1 < pic_count) ? cur + 1 : 0; }
 		else if (key == 2) { cur = (cur > 0) ? cur - 1 : pic_count - 1; }
 		else if (key == 3) { collect_jpg(fs); XART1.OutFormat("%u JPG\r\n", (unsigned)pic_count); if (pic_count) cur = 0; }
+		key_event = 0;
 	}
 }
 void printlog(loglevel_t level, const char* fmt, ...) {}
