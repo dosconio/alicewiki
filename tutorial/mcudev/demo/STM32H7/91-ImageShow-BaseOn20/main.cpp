@@ -43,12 +43,6 @@ GPIN& KEYR = GPIOH[ 3];// Right(KEY0)
 
 void outtxt(const char* str, stduint len) {XART1.out(str, len);}
 
-// 内存管理：使用成熟 Mempool（c/mempool.h），管理外部 SDRAM 切片。
-// 注意：LTDC 帧缓冲占用 SDRAM_BANK1_BASE 起的 ~0xC0000 字节，Mempool 切片避开。
-// Mempool 本身是 trait::Malloc 的子类，可直接作为 JPEGCodecHard::Decode 的分配器。
-// operator new 必须返回最大对齐地址（8 字节），否则对象被非对齐访问会 bus fault。
-// Mempool 的 alignment 是 2 的指数：3 -> 2^3 = 8 字节对齐。
-
 
 // Mempool 管理的内存切片（照 80-Memman：SDRAM + SRAM12 + SRAM4，不用 AXI/ITCM）。
 // 避开 LTDC 帧缓冲（SDRAM_BANK1_BASE 起 ~0xC0000）与下方 FAT 缓冲（+0x100000 起 1KB）。
@@ -56,9 +50,26 @@ void outtxt(const char* str, stduint len) {XART1.out(str, len);}
 #define SDRAM_POOL_SIZE (4U * 1024U * 1024U)
 #define SRAM12_ADDR ((stduint)0x30000000)
 #define SRAM4_ADDR  ((stduint)0x38000000)
+
+#define IMAGE_CARD_BLOCK_SIZE 512
+#define IMAGE_FILE_BLOCK_SIZE IMAGE_CARD_BLOCK_SIZE
+#define PNG_FILE_BLOCK_SIZE 4096
+#define IMAGE_PROFILE 1
+#define IMAGE_CARD_CACHE 1
+#define IMAGE_CARD_CACHE_BLOCKS 32
+#define IMAGE_CARD_CACHE_BYTES (IMAGE_CARD_BLOCK_SIZE * IMAGE_CARD_CACHE_BLOCKS)
+#define IMAGE_CARD_CACHE_INVALID_BLOCK ((stduint)-1)
+#define IMAGE_CARD_READAHEAD 0 // !!
+#define IMAGE_CARD_READAHEAD_BLOCKS 8
+#define IMAGE_CARD_READ_TIMEOUT_MS 1000
+#define IMAGE_CARD_READAHEAD_BYTES (IMAGE_CARD_BLOCK_SIZE * IMAGE_CARD_READAHEAD_BLOCKS)
+#define IMAGE_FAT_BUFFER_SIZE IMAGE_CARD_BLOCK_SIZE
+#if IMAGE_CARD_READAHEAD_BLOCKS > IMAGE_CARD_CACHE_BLOCKS
+#error IMAGE_CARD_READAHEAD_BLOCKS must not exceed IMAGE_CARD_CACHE_BLOCKS
+#endif
 // FAT / JPEG 缓冲（外部 SDRAM，避开 LTDC 帧缓冲与 MEMPOOL 切片）
 static byte* sector_buf = (byte*)(SDRAM_BANK1_BASE + 0x100000); // 扇区缓冲 512B（1MB 处）
-static byte* fat_buf    = sector_buf + 512;                     // FAT 表缓冲 512B
+static byte* fat_buf    = sector_buf + IMAGE_FAT_BUFFER_SIZE;    // FAT 表缓冲 512B
 #define MAX_PIC 64
 static const char* pic_name[MAX_PIC];                   // 图片路径数组
 static stduint pic_count = 0;                           // 图片数量
@@ -68,6 +79,10 @@ static stduint pic_count = 0;                           // 图片数量
 #define LCD_H 480
 #define LCD_FB ((uint16*)FMC_SDRAM_BANK1_BASE)
 
+#include "../_opendev/_ImageProfile.hpp"
+
+
+
 // 基于 FAT 的按块读取 StorageTrait：不把整个文件读进内存，按需 readfl 一个 block。
 class FileBlockDevice : public StorageTrait {
 private:
@@ -75,7 +90,7 @@ private:
 	void* file_handle;
 	stduint m_size;
 public:
-	FileBlockDevice(FilesysFAT& f, void* fh, stduint size, stduint blockSize = 512)
+	FileBlockDevice(FilesysFAT& f, void* fh, stduint size, stduint blockSize = IMAGE_FILE_BLOCK_SIZE)
 		: fs(&f), file_handle(fh), m_size(size) {
 		Block_Size = blockSize;
 		readable = true;
@@ -88,7 +103,15 @@ public:
 		if (off >= m_size) return false;
 		stduint want = Block_Size;
 		if (off + want > m_size) want = m_size - off;
+#if IMAGE_PROFILE
+		uint64 t0 = profile_now();
+#endif
 		stduint rd = fs->readfl(file_handle, Slice{ off, want }, (byte*)Dest);
+#if IMAGE_PROFILE
+		image_profile.sd_read_count++;
+		image_profile.sd_read_bytes += rd;
+		image_profile.sd_read_ms += profile_now() - t0;
+#endif
 		return rd == want;
 	}
 
@@ -104,7 +127,16 @@ public:
 	int operator[](uint64 bytid) override {
 		if (bytid >= m_size) return -1;
 		byte b = 0;
-		if (fs->readfl(file_handle, Slice{ (stduint)bytid, 1 }, &b) == 1) return b;
+#if IMAGE_PROFILE
+		uint64 t0 = profile_now();
+#endif
+		stduint rd = fs->readfl(file_handle, Slice{ (stduint)bytid, 1 }, &b);
+#if IMAGE_PROFILE
+		image_profile.sd_byte_count++;
+		image_profile.sd_read_bytes += rd;
+		image_profile.sd_read_ms += profile_now() - t0;
+#endif
+		if (rd == 1) return b;
 		return -1;
 	}
 };
@@ -144,6 +176,91 @@ static stduint collect_jpg(FilesysFAT& fs) {
 	if (!fs.search("/", &sargs)) return 0;
 	fs.enumer(&h, on_seg);
 	return pic_count;
+}
+
+
+
+// Stream PNG scanlines as RGB565 and scale directly into the LCD framebuffer.
+static ImageResult show_png_stream(FileBlockDevice& mem, PNGCodec& png, trait::Malloc& allocator, const ImageDecodeOptions& dopt) {
+	IImageSurface* surface = nullptr;
+#if IMAGE_PROFILE
+	uint64 t0 = profile_now();
+#endif
+	ImageResult r = png.OpenSurface(mem, surface, allocator, dopt, ImageAccessMode::READ_ONLY);
+#if IMAGE_PROFILE
+	image_profile.png_open_ms += profile_now() - t0;
+#endif
+	if (r != ImageResult::OK || !surface) return r;
+
+	ImageInfo info;
+	r = surface->GetInfo(info);
+	if (r != ImageResult::OK || !info.width || !info.height) {
+		surface->Release();
+		return r == ImageResult::OK ? ImageResult::INVALID_FORMAT : r;
+	}
+
+	stduint dst_w = 0, dst_h = 0;
+	PictureOperation::FitAspect(info.width, info.height, LCD_W, LCD_H, dst_w, dst_h);
+	stduint row_size = info.width * sizeof(uint16);
+	uint16* src_row = (uint16*)allocator.allocate(row_size, 1);
+	if (!src_row) {
+		surface->Release();
+		return ImageResult::OUT_OF_MEMORY;
+	}
+
+	ImageBuffer row;
+	ImageBufferClear(row);
+	row.width = info.width;
+	row.height = 1;
+	row.stride = (uint32)row_size;
+	row.format = PixelFormat::RGB565;
+	row.colorSpace = ColorSpace::SRGB;
+	row.alphaMode = ImageAlphaMode::NONE;
+	row.pixels = src_row;
+	row.size = row_size;
+	row.allocator = nullptr;
+
+	stduint ox = (LCD_W > dst_w) ? (LCD_W - dst_w) / 2 : 0;
+	stduint oy = (LCD_H > dst_h) ? (LCD_H - dst_h) / 2 : 0;
+	stduint last_sy = (stduint)-1;
+	for (stduint dy = 0; dy < dst_h; dy++) {
+		stduint sy = dy * info.height / dst_h;
+		if (sy != last_sy) {
+			Rectangle src_rect(Point(0, sy), Size2(info.width, 1));
+#if IMAGE_PROFILE
+			t0 = profile_now();
+#endif
+			r = surface->ReadPixels(src_rect, row, allocator);
+#if IMAGE_PROFILE
+			image_profile.png_read_ms += profile_now() - t0;
+			image_profile.png_rows++;
+#endif
+			if (r != ImageResult::OK) break;
+			last_sy = sy;
+		}
+		uint16* dst = LCD_FB + (oy + dy) * LCD_W + ox;
+		uint32 sx_acc = 0;
+		uint32 sx_step = ((uint32)info.width << 16) / (uint32)dst_w;
+#if IMAGE_PROFILE
+		t0 = profile_now();
+#endif
+		for (stduint dx = 0; dx < dst_w; dx++) {
+			dst[dx] = src_row[sx_acc >> 16];
+			sx_acc += sx_step;
+		}
+#if IMAGE_PROFILE
+		image_profile.png_draw_ms += profile_now() - t0;
+		image_profile.png_pixels += dst_w;
+#endif
+	}
+
+	allocator.deallocate(src_row, row_size);
+	surface->Release();
+	if (r == ImageResult::OK) {
+		XART1.OutFormat("show PNG %ux%u -> %ux%u\r\n",
+			(unsigned)info.width, (unsigned)info.height, (unsigned)dst_w, (unsigned)dst_h);
+	}
+	return r;
 }
 
 // ---- 按键中断（EXTI）回调：只置事件标志，处理放主循环 ----
@@ -195,10 +312,18 @@ int main() {
 		XART1.OutFormat("SD Error!\r\n");
 		while (1) { SysDelay_ms(1000); }
 	}
-	SDCard1.Block_Size = 512;
+	SDCard1.Block_Size = IMAGE_CARD_BLOCK_SIZE;
 
 	// 挂载 FAT
+#if IMAGE_CARD_CACHE
+	CachedStorageDevice cached_sd(SDCard1);
+	FilesysFAT fs(0, cached_sd, sector_buf, fat_buf);
+#elif IMAGE_PROFILE
+	ProfileStorageDevice profiled_sd(SDCard1);
+	FilesysFAT fs(0, profiled_sd, sector_buf, fat_buf);
+#else
 	FilesysFAT fs(0, SDCard1, sector_buf, fat_buf);
+#endif
 	if (!fs.loadfs()) {
 		XART1.OutFormat("FAT mount FAIL %u\r\n", (unsigned)fs.error_number);
 		while (1) { SysDelay_ms(1000); }
@@ -228,7 +353,14 @@ int main() {
 		FAT_FileHandle fh;
 		FilesysSearchArgs sargs{};
 		sargs.handle_buffer = &fh;
+#if IMAGE_PROFILE
+		profile_reset();
+		uint64 t0 = profile_now();
+#endif
 		void* fh2 = fs.search(pic_name[cur], &sargs);
+#if IMAGE_PROFILE
+		image_profile.search_ms += profile_now() - t0;
+#endif
 		if (!fh2 || fh.is_dir || !fh.size) {
 			XART1.OutFormat("open %s FAIL\r\n", pic_name[cur]);
 		} else {
@@ -238,22 +370,42 @@ int main() {
 			// 按块读取（不整文件进内存），解码器按需 readfl
 			ImageBuffer out;
 			ImageBufferClear(out);
-			FileBlockDevice mem(fs, fh2, fsize, 512);
 			ImageResult r;
 			stduint nlen = StrLength(pic_name[cur]);
 			const char* ext = pic_name[cur] + nlen - 4;
 			if (StrCompareInsensitive(ext, ".png") == 0) {
-				r = png.Decode(mem, out, mempool, dopt);
+				FileBlockDevice mem(fs, fh2, fsize, PNG_FILE_BLOCK_SIZE);
+#if IMAGE_PROFILE
+				t0 = profile_now();
+#endif
+				r = show_png_stream(mem, png, mempool, dopt);
+#if IMAGE_PROFILE
+				image_profile.decode_ms += profile_now() - t0;
+#endif
 			} else if (StrCompareInsensitive(ext, ".bmp") == 0) {
+				FileBlockDevice mem(fs, fh2, fsize, IMAGE_FILE_BLOCK_SIZE);
+#if IMAGE_PROFILE
+				t0 = profile_now();
+#endif
 				r = bmp.Decode(mem, out, mempool, dopt);
+#if IMAGE_PROFILE
+				image_profile.decode_ms += profile_now() - t0;
+#endif
 			} else {
+				FileBlockDevice mem(fs, fh2, fsize, IMAGE_FILE_BLOCK_SIZE);
 				// 硬件 JPEG，失败则回退软件 JPEG
+#if IMAGE_PROFILE
+				t0 = profile_now();
+#endif
 				r = hw.Decode(mem, out, mempool, dopt);
 				if (r != ImageResult::OK || !out.pixels) {
 					ImageBufferFree(out);
 					XART1.OutFormat("hw FAIL %d -> soft\r\n", (int)r);
 					r = soft.Decode(mem, out, mempool, dopt);
 				}
+#if IMAGE_PROFILE
+				image_profile.decode_ms += profile_now() - t0;
+#endif
 			}
 			if (r == ImageResult::OK && out.pixels) {
 				// 保持宽高比算目标尺寸，再用库最近邻缩放，最后居中写帧缓冲
@@ -262,6 +414,9 @@ int main() {
 
 				ImageBuffer scaled;
 				ImageBufferClear(scaled);
+#if IMAGE_PROFILE
+				t0 = profile_now();
+#endif
 				r = PictureOperation::ScaleNearest(out, scaled, dst_w, dst_h, PixelFormat::RGB565, mempool);
 				if (r == ImageResult::OK && scaled.pixels) {
 					uint16* px = (uint16*)scaled.pixels;
@@ -277,10 +432,16 @@ int main() {
 						(unsigned)out.width, (unsigned)out.height, (unsigned)dst_w, (unsigned)dst_h);
 					ImageBufferFree(scaled);
 				}
+#if IMAGE_PROFILE
+				image_profile.scale_ms += profile_now() - t0;
+#endif
 				ImageBufferFree(out);
-			} else {
+			} else if (r != ImageResult::OK) {
 				XART1.OutFormat("decode FAIL %d\r\n", (int)r);
 			}
+#if IMAGE_PROFILE
+			profile_print(pic_name[cur], r);
+#endif
 		}
 		key_event = 0;// 反复消抖
 		LEDB.Toggle();
