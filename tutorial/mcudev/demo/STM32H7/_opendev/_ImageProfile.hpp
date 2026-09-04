@@ -77,12 +77,7 @@ private:
 #if IMAGE_PROFILE
 		uint64 t0 = profile_now();
 #endif
-		bool ok = false;
-		if (count == 1) {
-			ok = storage->Read(block, data);
-		} else {
-			ok = storage->HAL_SD_ReadBlocks(data, block, count, IMAGE_CARD_READ_TIMEOUT_MS, nullptr);
-		}
+		bool ok = storage->Read(data, block, count, IOMethod::Loop, IMAGE_CARD_READ_TIMEOUT_MS, nullptr);
 #if IMAGE_PROFILE
 		image_profile.card_read_call_count++;
 		if (ok) {
@@ -95,6 +90,9 @@ private:
 	}
 
 public:
+	using BlockTrait::Read;
+	using BlockTrait::Write;
+
 	CachedStorageDevice(SecureDigitalCard_t& inner) : storage(&inner), age_clock(0) {
 		Block_Size = inner.Block_Size;
 		readable = inner.readable;
@@ -106,60 +104,70 @@ public:
 		}
 	}
 
-	bool Read(stduint BlockIden, void* Dest) override {
-		for (stduint i = 0; i < IMAGE_CARD_CACHE_BLOCKS; ++i) {
-			if (image_card_cache[i].valid && image_card_cache[i].block == BlockIden) {
-				image_card_cache[i].age = ++age_clock;
-				MemCopyN(Dest, cache_data(i), IMAGE_CARD_BLOCK_SIZE);
+	bool Read(stduint BlockIden, void* Dest, stduint Times = 1) override {
+		for0(t, Times) {
+			stduint blk = BlockIden + t;
+			byte* dst = (byte*)Dest + t * Block_Size;
+			bool found = false;
+			for (stduint i = 0; i < IMAGE_CARD_CACHE_BLOCKS; ++i) {
+				if (image_card_cache[i].valid && image_card_cache[i].block == blk) {
+					image_card_cache[i].age = ++age_clock;
+					MemCopyN(dst, cache_data(i), IMAGE_CARD_BLOCK_SIZE);
 #if IMAGE_PROFILE
-				image_profile.cache_hit_count++;
+					image_profile.cache_hit_count++;
 #endif
-				return true;
+					found = true;
+					break;
+				}
 			}
-		}
+			if (found) continue;
 
 #if IMAGE_PROFILE
-		image_profile.cache_miss_count++;
+			image_profile.cache_miss_count++;
 #endif
 
 #if IMAGE_CARD_READAHEAD
-		stduint count = IMAGE_CARD_READAHEAD_BLOCKS;
-		stduint units = getUnits();
-		if (BlockIden + count > units) count = units - BlockIden;
-		bool readahead_ok = count && read_blocks(BlockIden, count, image_card_readahead_data);
-		if (readahead_ok) {
-			for (stduint i = 0; i < count; ++i) {
-				stduint slot = choose_slot();
-				fill_slot(slot, BlockIden + i, image_card_readahead_data + i * IMAGE_CARD_BLOCK_SIZE);
+			stduint count = IMAGE_CARD_READAHEAD_BLOCKS;
+			stduint units = getUnits();
+			if (blk + count > units) count = units - blk;
+			bool readahead_ok = count && read_blocks(blk, count, image_card_readahead_data);
+			if (readahead_ok) {
+				for (stduint i = 0; i < count; ++i) {
+					stduint slot = choose_slot();
+					fill_slot(slot, blk + i, image_card_readahead_data + i * IMAGE_CARD_BLOCK_SIZE);
+				}
+				MemCopyN(dst, image_card_readahead_data, IMAGE_CARD_BLOCK_SIZE);
+				continue;
 			}
-			MemCopyN(Dest, image_card_readahead_data, IMAGE_CARD_BLOCK_SIZE);
-			return true;
-		}
 #if IMAGE_PROFILE
-		image_profile.card_read_fallback_count++;
+			image_profile.card_read_fallback_count++;
 #endif
 #endif
 
-		stduint slot = choose_slot();
-		byte* data = cache_data(slot);
-		bool ok = read_blocks(BlockIden, 1, data);
-		if (!ok) {
-			image_card_cache[slot].valid = false;
-			return false;
+			stduint slot = choose_slot();
+			byte* data = cache_data(slot);
+			bool ok = read_blocks(blk, 1, data);
+			if (!ok) {
+				image_card_cache[slot].valid = false;
+				return false;
+			}
+			fill_slot(slot, blk, data);
+			MemCopyN(dst, data, IMAGE_CARD_BLOCK_SIZE);
 		}
-		fill_slot(slot, BlockIden, data);
-		MemCopyN(Dest, data, IMAGE_CARD_BLOCK_SIZE);
 		return true;
 	}
 
-	bool Write(stduint BlockIden, const void* Sors) override {
-		for (stduint i = 0; i < IMAGE_CARD_CACHE_BLOCKS; ++i) {
-			if (image_card_cache[i].valid && image_card_cache[i].block == BlockIden) {
-				image_card_cache[i].valid = false;
-				break;
+	bool Write(stduint BlockIden, const void* Sors, stduint Times = 1) override {
+		for0(j, Times) {
+			stduint blk = BlockIden + j;
+			for (stduint i = 0; i < IMAGE_CARD_CACHE_BLOCKS; ++i) {
+				if (image_card_cache[i].valid && image_card_cache[i].block == blk) {
+					image_card_cache[i].valid = false;
+					break;
+				}
 			}
 		}
-		return storage->Write(BlockIden, Sors);
+		return storage->Write(BlockIden, Sors, Times);
 	}
 
 	stduint getUnits() override {
@@ -177,26 +185,29 @@ class ProfileStorageDevice : public StorageTrait {
 private:
 	StorageTrait* storage;
 public:
+	using BlockTrait::Read;
+	using BlockTrait::Write;
+
 	ProfileStorageDevice(StorageTrait& inner) : storage(&inner) {
 		Block_Size = inner.Block_Size;
 		readable = inner.readable;
 		writable = inner.writable;
 	}
 
-	bool Read(stduint BlockIden, void* Dest) override {
+	bool Read(stduint BlockIden, void* Dest, stduint Times = 1) override {
 		uint64 t0 = profile_now();
-		bool ok = storage->Read(BlockIden, Dest);
+		bool ok = storage->Read(BlockIden, Dest, Times);
 		image_profile.card_read_call_count++;
 		if (ok) {
-			image_profile.card_read_block_count++;
-			image_profile.card_read_bytes += Block_Size;
+			image_profile.card_read_block_count += Times;
+			image_profile.card_read_bytes += Block_Size * Times;
 		}
 		image_profile.card_read_ms += profile_now() - t0;
 		return ok;
 	}
 
-	bool Write(stduint BlockIden, const void* Sors) override {
-		return storage->Write(BlockIden, Sors);
+	bool Write(stduint BlockIden, const void* Sors, stduint Times = 1) override {
+		return storage->Write(BlockIden, Sors, Times);
 	}
 
 	stduint getUnits() override {

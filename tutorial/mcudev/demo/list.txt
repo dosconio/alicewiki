@@ -20,7 +20,8 @@
 16-SDRAM DDR
 17-EEPROM
 18-Flash-NOR
-18-Flash-NAND
+18-Flash-FMC-NOR
+18-Flash-FMC-NAND
 
 20-LTDC ---- 依赖于 DDR/SDRAM
 20-LTDC-DMA2D
@@ -37,6 +38,9 @@
 51-Power
 
 80-Memman
+81-USBS-Storage
+82-USBM
+
 90-KanjiFont
 91-ImageShow
 92-AudioPlay

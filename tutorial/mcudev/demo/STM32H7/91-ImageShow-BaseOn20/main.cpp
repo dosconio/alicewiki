@@ -96,27 +96,29 @@ public:
 		readable = true;
 		writable = false;
 	}
+	using BlockTrait::Read;
+	using BlockTrait::Write;
 
-	bool Read(stduint BlockIden, void* Dest) override {
-		if (BlockIden >= getUnits()) return false;
+	bool Read(stduint BlockIden, void* Dest, stduint Times = 1) override {
+		if (BlockIden >= getUnits() || BlockIden + Times > getUnits()) return false;
 		stduint off = BlockIden * Block_Size;
 		if (off >= m_size) return false;
-		stduint want = Block_Size;
+		stduint want = Block_Size * Times;
 		if (off + want > m_size) want = m_size - off;
 #if IMAGE_PROFILE
 		uint64 t0 = profile_now();
 #endif
 		stduint rd = fs->readfl(file_handle, Slice{ off, want }, (byte*)Dest);
 #if IMAGE_PROFILE
-		image_profile.sd_read_count++;
+		image_profile.sd_read_count += Times;
 		image_profile.sd_read_bytes += rd;
 		image_profile.sd_read_ms += profile_now() - t0;
 #endif
 		return rd == want;
 	}
 
-	bool Write(stduint BlockIden, const void* Sors) override {
-		(void)BlockIden; (void)Sors;
+	bool Write(stduint BlockIden, const void* Sors, stduint Times = 1) override {
+		(void)BlockIden; (void)Sors; (void)Times;
 		return false;
 	}
 
