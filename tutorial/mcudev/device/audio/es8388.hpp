@@ -11,11 +11,12 @@
 #include <cpp/unisym>
 #include <cpp/Device/IIC>
 #include <cpp/Device/SysTick>
+#include <cpp/System/Audiosys.hpp>
 #endif
 
 #define ES8388_ADDR 0x10
 
-class ES8388_t {
+class ES8388_t : public uni::SubACI {
 public:
 	enum class I2SFormat : byte {
 		Standard = 0,// Philips I2S
@@ -133,6 +134,75 @@ public:
 		gain |= (gain << 4);
 		Send(0x09, gain);
 	}
+
+public: // ---- uni::SubACI ----
+	bool isReady() const {
+		return true;
+	}
+
+	bool setFormat(const uni::AudioFormat& format) {
+		format_cache = format;
+		return true;
+	}
+
+	bool ConfigI2S(uint32 fmt, uint32 bits) {
+		I2SLength len;
+		switch (bits) {
+		case 16: len = I2SLength::Bit16; break;
+		case 18: len = I2SLength::Bit18; break;
+		case 20: len = I2SLength::Bit20; break;
+		case 24: len = I2SLength::Bit24; break;
+		case 32: len = I2SLength::Bit32; break;
+		default: return false;
+		}
+		if (fmt > (uint32)I2SFormat::PCM) return false;
+		SetI2S((I2SFormat)fmt, len);
+		return true;
+	}
+
+	stduint getChannelCount() const {
+		return 2;
+	}
+
+	const char* getChannelName(stduint ch) const {
+		switch (ch) {
+		case 0: return "Headphone";
+		case 1: return "Speaker";
+		default: return nullptr;
+		}
+	}
+
+	bool getMainChannel(stduint& out) const {
+		out = 0;
+		return true;
+	}
+
+	bool setVolume(stduint ch, uint32 left, uint32 right) {
+		if (ch > 1) return false;
+		uint32 percent = (left + right) / 2;
+		if (percent > 100) percent = 100;
+		volume_cache[ch] = percent;
+		byte vol = (byte)(percent * 33 / 100);
+		if (ch == 0) SetHPVol(vol); else SetSPKVol(vol);
+		return true;
+	}
+
+	bool getVolume(stduint ch, uint32& left, uint32& right) const {
+		if (ch > 1) return false;
+		left = right = volume_cache[ch];
+		return true;
+	}
+
+	bool setMute(stduint ch, bool mute = true) {
+		if (ch > 1) return false;
+		byte vol = mute ? 0 : (byte)(volume_cache[ch] * 33 / 100);
+		if (ch == 0) SetHPVol(vol); else SetSPKVol(vol);
+		return true;
+	}
+
+protected:
+	uni::AudioFormat format_cache;
+	uint32 volume_cache[2] = { 100, 100 };
 };
 
 #endif

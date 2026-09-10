@@ -10,11 +10,12 @@
 #ifndef __USYM__
 #include <cpp/unisym>
 #include <cpp/Device/IIC>
+#include <cpp/System/Audiosys.hpp>
 #endif
 
 #define WM8978_ADDR 0x1A
 
-class WM8978_t {
+class WM8978_t : public uni::SubACI {
 public:
 	enum class I2SFormat : byte {
 		LSB = 0,
@@ -212,6 +213,75 @@ public:
 		uint16 regval = ((cfreq & 0x03) << 5) | (gain & 0x1F) | (1 << 8);
 		WriteReg(22, regval);
 	}
+
+public: // ---- uni::SubACI ----
+	bool isReady() const {
+		return true;
+	}
+
+	bool setFormat(const uni::AudioFormat& format) {
+		format_cache = format;
+		return true;
+	}
+
+	bool ConfigI2S(uint32 fmt, uint32 bits) {
+		I2SLength len;
+		switch (bits) {
+		case 16: len = I2SLength::Bit16; break;
+		case 20: len = I2SLength::Bit20; break;
+		case 24: len = I2SLength::Bit24; break;
+		case 32: len = I2SLength::Bit32; break;
+		default: return false;
+		}
+		if (fmt > 3) return false;
+		// 0 表示本设备的标准 I2S(Philips): WM8978 的 Standard = 2
+		SetI2S(fmt == 0 ? I2SFormat::Standard : (I2SFormat)fmt, len);
+		return true;
+	}
+
+	stduint getChannelCount() const {
+		return 2;
+	}
+
+	const char* getChannelName(stduint ch) const {
+		switch (ch) {
+		case 0: return "Headphone";
+		case 1: return "Speaker";
+		default: return nullptr;
+		}
+	}
+
+	bool getMainChannel(stduint& out) const {
+		out = 0;
+		return true;
+	}
+
+	bool setVolume(stduint ch, uint32 left, uint32 right) {
+		if (ch > 1) return false;
+		uint32 percent = (left + right) / 2;
+		if (percent > 100) percent = 100;
+		volume_cache[ch] = percent;
+		byte vol = (byte)(percent * 63 / 100);
+		if (ch == 0) SetHPVol(vol, vol); else SetSPKVol(vol);
+		return true;
+	}
+
+	bool getVolume(stduint ch, uint32& left, uint32& right) const {
+		if (ch > 1) return false;
+		left = right = volume_cache[ch];
+		return true;
+	}
+
+	bool setMute(stduint ch, bool mute = true) {
+		if (ch > 1) return false;
+		byte vol = mute ? 0 : (byte)(volume_cache[ch] * 63 / 100);
+		if (ch == 0) SetHPVol(vol, vol); else SetSPKVol(vol);
+		return true;
+	}
+
+protected:
+	uni::AudioFormat format_cache;
+	uint32 volume_cache[2] = { 100, 100 };
 };
 
 #endif

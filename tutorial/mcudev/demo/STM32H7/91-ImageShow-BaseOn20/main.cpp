@@ -80,68 +80,11 @@ static stduint pic_count = 0;                           // 图片数量
 #define LCD_FB ((uint16*)FMC_SDRAM_BANK1_BASE)
 
 #include "../_opendev/_ImageProfile.hpp"
+#include "../_opendev/_FileBlockDevice.hpp"   // 共享: FAT 文件 → 按块 StorageTrait (原 86-144 行本地类已抽出)
 
 
 
-// 基于 FAT 的按块读取 StorageTrait：不把整个文件读进内存，按需 readfl 一个 block。
-class FileBlockDevice : public StorageTrait {
-private:
-	FilesysFAT* fs;
-	void* file_handle;
-	stduint m_size;
-public:
-	FileBlockDevice(FilesysFAT& f, void* fh, stduint size, stduint blockSize = IMAGE_FILE_BLOCK_SIZE)
-		: fs(&f), file_handle(fh), m_size(size) {
-		Block_Size = blockSize;
-		readable = true;
-		writable = false;
-	}
-	using BlockTrait::Read;
-	using BlockTrait::Write;
-
-	bool Read(stduint BlockIden, void* Dest, stduint Times = 1) override {
-		if (BlockIden >= getUnits() || BlockIden + Times > getUnits()) return false;
-		stduint off = BlockIden * Block_Size;
-		if (off >= m_size) return false;
-		stduint want = Block_Size * Times;
-		if (off + want > m_size) want = m_size - off;
-#if IMAGE_PROFILE
-		uint64 t0 = profile_now();
-#endif
-		stduint rd = fs->readfl(file_handle, Slice{ off, want }, (byte*)Dest);
-#if IMAGE_PROFILE
-		image_profile.sd_read_count += Times;
-		image_profile.sd_read_bytes += rd;
-		image_profile.sd_read_ms += profile_now() - t0;
-#endif
-		return rd == want;
-	}
-
-	bool Write(stduint BlockIden, const void* Sors, stduint Times = 1) override {
-		(void)BlockIden; (void)Sors; (void)Times;
-		return false;
-	}
-
-	stduint getUnits() override {
-		return (m_size + Block_Size - 1) / Block_Size;
-	}
-
-	int operator[](uint64 bytid) override {
-		if (bytid >= m_size) return -1;
-		byte b = 0;
-#if IMAGE_PROFILE
-		uint64 t0 = profile_now();
-#endif
-		stduint rd = fs->readfl(file_handle, Slice{ (stduint)bytid, 1 }, &b);
-#if IMAGE_PROFILE
-		image_profile.sd_byte_count++;
-		image_profile.sd_read_bytes += rd;
-		image_profile.sd_read_ms += profile_now() - t0;
-#endif
-		if (rd == 1) return b;
-		return -1;
-	}
-};
+// (FileBlockDevice 已抽到 ../_opendev/_FileBlockDevice.hpp, 见上方 include)
 
 // 枚举回调：_tocall_ft 是变参函数指针，FAT 按 (is_dir, name) 两参调用（见 FAT.cpp:531）
 // C++ 中 lambda/普通函数不能隐式转变参函数指针，故用真正的变参函数。
