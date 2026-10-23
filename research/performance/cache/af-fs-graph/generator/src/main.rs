@@ -778,8 +778,13 @@ fn main() {
 
         let mut abstract_nodes: std::collections::HashMap<String, NodeInfo> =
             std::collections::HashMap::new();
+        let mut array_layouts: std::collections::HashSet<(u64, u64)> =
+            std::collections::HashSet::new();
         for lbl in group_nodes_set {
             if let Some(info) = node_map.get(&lbl) {
+                if info.elem_size > 0 {
+                    array_layouts.insert((info.base_address, info.elem_size));
+                }
                 let albl = abstract_label(lbl.clone(), info);
                 if !abstract_nodes.contains_key(&albl) {
                     let mut ainfo = info.clone();
@@ -848,6 +853,16 @@ fn main() {
             }
             if info.elem_size > 0 {
                 attributes.push_str(&format!(", elem_size={}", info.elem_size));
+            }
+            if group_opt.as_ref().is_some_and(|g| g.ends_with(".fields"))
+                && array_layouts.len() == 1
+            {
+                if let Some((array_base, array_elem)) = array_layouts.iter().next() {
+                    attributes.push_str(&format!(
+                        ", array_base={}, array_elem_size={}",
+                        array_base, array_elem
+                    ));
+                }
             }
             writeln!(
                 out,

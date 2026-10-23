@@ -52,6 +52,8 @@ struct Edge {
     v: String,
     a: f64,
     b: f64,
+    same_line: u64,
+    cross_line: u64,
 }
 
 struct EvaluatedCandidate {
@@ -169,9 +171,10 @@ fn main() {
 
     let node_re = Regex::new(r#"^\s*"([^"]+)"\s*\[.*?\boffset=(\d+).*\];"#).unwrap();
     // Use multi-line regex for edges
-    let edge_re =
-        Regex::new(r#""([^"]+)"\s*--\s*"([^"]+)"\s*\[[^\]]*?label="\(([\d\.]+),([\d\.]+)\)""#)
-            .unwrap();
+    let edge_re = Regex::new(
+        r#""([^"]+)"\s*--\s*"([^"]+)"\s*\[[^\]]*?label="\(([\d\.]+),([\d\.]+)\)"(?:[^\]]*?count1=(\d+))?(?:[^\]]*?count2=(\d+))?"#,
+    )
+    .unwrap();
     let name_re = Regex::new(r#"^([^\[]+)((?:\[\d+\])+)(.*)$"#).unwrap();
     let dims_re = Regex::new(r#"dims="([0-9,]+)""#).unwrap();
     let elem_re = Regex::new(r#"elem_size=(\d+)"#).unwrap();
@@ -267,7 +270,22 @@ fn main() {
         let v = caps[2].to_string();
         let a: f64 = caps[3].parse().unwrap_or(0.0);
         let b: f64 = caps[4].parse().unwrap_or(0.0);
-        edges.push(Edge { u, v, a, b });
+        let same_line: u64 = caps
+            .get(5)
+            .and_then(|m| m.as_str().parse::<u64>().ok())
+            .unwrap_or(0);
+        let cross_line: u64 = caps
+            .get(6)
+            .and_then(|m| m.as_str().parse::<u64>().ok())
+            .unwrap_or(0);
+        edges.push(Edge {
+            u,
+            v,
+            a,
+            b,
+            same_line,
+            cross_line,
+        });
     }
 
     if nodes.is_empty() {
@@ -729,6 +747,58 @@ fn main() {
             "full-graph candidate re-evaluation found a positive improvement",
         )
     };
+    let array_base_address = nodes.values().map(|n| n.base_address).min().unwrap_or(0);
+    let base_mod_line = if memoryline > 0 {
+        array_base_address % memoryline
+    } else {
+        0
+    };
+    let stride_mod_line = if memoryline > 0 {
+        struct_size % memoryline
+    } else {
+        0
+    };
+    let elements_per_line = if stride_mod_line == 0 && struct_size > 0 && struct_size <= memoryline {
+        memoryline / struct_size
+    } else {
+        0
+    };
+    let same_line_conflicts: u64 = edges
+        .iter()
+        .filter(|e| nodes.contains_key(&e.u) && nodes.contains_key(&e.v))
+        .map(|e| e.same_line)
+        .sum();
+    let cross_line_conflicts: u64 = edges
+        .iter()
+        .filter(|e| nodes.contains_key(&e.u) && nodes.contains_key(&e.v))
+        .map(|e| e.cross_line)
+        .sum();
+    let mut alignment_remedies: Vec<String> = Vec::new();
+    if is_struct_array && stride_mod_line != 0 {
+        alignment_remedies.push(format!(
+            "pad element stride {} -> {} bytes",
+            struct_size,
+            align_up(struct_size, memoryline)
+        ));
+    }
+    if is_struct_array && base_mod_line != 0 {
+        alignment_remedies.push(format!("align array base to {} bytes", memoryline));
+    }
+    let best_instance_padding = candidates
+        .iter()
+        .filter(|c| c.action == "instance_padding")
+        .map(|c| c.score)
+        .fold(None::<f64>, |acc, score| {
+            Some(match acc {
+                Some(best) if best >= score => best,
+                _ => score,
+            })
+        });
+    let margin_over_instance_padding = match best_instance_padding {
+        Some(padding) => format!("{:.6}", selected.score - padding),
+        None => "null".to_string(),
+    };
+
     let decision_file = dot_file.replace(".dot", ".decision.json");
     if let Ok(mut f) = File::create(&decision_file) {
         let _ = writeln!(f, "{{");
@@ -765,6 +835,27 @@ fn main() {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "null".into())
         );
+        if is_struct_array {
+            let _ = writeln!(
+                f,
+                "  \"alignment\": {{\"array_base\": {}, \"base_mod_line\": {}, \"line_size\": {}, \"element_stride\": {}, \"stride_mod_line\": {}, \"elements_per_line\": {}, \"straddles\": {}, \"same_line_conflicts\": {}, \"cross_line_conflicts\": {}, \"margin_over_instance_padding\": {}, \"remedy\": \"{}\"}},",
+                array_base_address,
+                base_mod_line,
+                memoryline,
+                struct_size,
+                stride_mod_line,
+                elements_per_line,
+                base_mod_line != 0 || stride_mod_line != 0,
+                same_line_conflicts,
+                cross_line_conflicts,
+                margin_over_instance_padding,
+                json_escape(&if alignment_remedies.is_empty() {
+                    "none; every element owns whole cache lines".to_string()
+                } else {
+                    alignment_remedies.join("; ")
+                })
+            );
+        }
         let _ = writeln!(f, "  \"candidates\": [");
         for (index, candidate) in candidates.iter().enumerate() {
             let comma = if index + 1 == candidates.len() {

@@ -37,6 +37,41 @@ def parse_sharing_edges(dot_file):
             unclassified_fields.append((field_name, int(alpha_match.group(1))))
     return true_sharing_fields, cross_instance_fields, unclassified_fields
 
+def parse_array_geometry(dot_file):
+    """Return element size, array base and same/cross line pair counts."""
+    if not os.path.exists(dot_file):
+        return None
+    with open(dot_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+    base_match = re.search(r'array_base=(\d+)', content)
+    elem_match = re.search(r'array_elem_size=(\d+)', content)
+    if not base_match or not elem_match:
+        return None
+    same_line = sum(int(v) for v in re.findall(r'count1=(\d+)', content))
+    cross_line = sum(int(v) for v in re.findall(r'count2=(\d+)', content))
+    pair_counts = {}
+    for u, v, attrs in re.findall(r'"([^"]+)"\s*--\s*"([^"]+)"\s*\[(.*?)\]', content, re.DOTALL):
+        match = re.search(r'count1=(\d+)', attrs)
+        if not match:
+            continue
+        count = int(match.group(1))
+        if count == 0:
+            continue
+        field_a = u.split("::")[-1]
+        field_b = v.split("::")[-1]
+        if field_a == field_b:
+            continue
+        key = tuple(sorted((field_a, field_b)))
+        pair_counts[key] = pair_counts.get(key, 0) + count
+    return {
+        "array_base": int(base_match.group(1)),
+        "element_size": int(elem_match.group(1)),
+        "same_line": same_line,
+        "cross_line": cross_line,
+        "line_pairs": sorted(pair_counts.items(), key=lambda item: -item[1]),
+    }
+
+
 def summarize_arrays(data_dir):
     print("="*60)
     print("📊 多维数组优化建议 (Array Layout & Transpose)")
@@ -107,7 +142,24 @@ def summarize_arrays(data_dir):
                 print(f"      👉 这表示重排下标顺序，不等同于笼统的“转成 SOA”。")
             elif action == "instance_padding":
                 print("   💡 结构化判决: 对数组实例做 Cacheline padding。")
-                print("      👉 保持字段组织，但让相邻实例从独立缓存行开始。")
+                alignment = decision.get("alignment") or {}
+                line = alignment.get("line_size") or 64
+                element_stride = alignment.get("element_stride")
+                padded_stride = decision.get("element_stride")
+                base_mod = alignment.get("base_mod_line")
+                steps = []
+                if base_mod:
+                    steps.append(f"数组起点按 {line} 字节对齐（当前起点 % {line} = {base_mod}，每格都被行边界切开）")
+                if element_stride and padded_stride and element_stride != padded_stride:
+                    steps.append(f"每格步长从 {element_stride} 补齐到 {padded_stride} 字节"
+                                 f"（一格 {element_stride} 字节，一行装不下一格，相邻两格必然共行）")
+                if steps:
+                    print("      👉 保持字段组织，"
+                          + ("同时做两件事（缺一件都不成立）：" if len(steps) == 2 else "只改这一处："))
+                    for index, step in enumerate(steps, 1):
+                        print(f"         {index}) {step}")
+                else:
+                    print("      👉 保持字段组织，但让相邻实例从独立缓存行开始。")
             elif action == "partial_soa":
                 field = decision.get("selected_field") or "<unknown>"
                 print(f"   💡 结构化判决: partial SOA，将热点字段 {field} 拆成独立数组。")
@@ -121,6 +173,27 @@ def summarize_arrays(data_dir):
                 print(f"      AoS 实例步长: {decision['element_stride']} 字节")
                 if decision.get("field_stride") is not None:
                     print(f"      拆出字段的数组步长: {decision['field_stride']} 字节")
+                if action == "instance_padding":
+                    alignment = decision.get("alignment") or {}
+                    element_stride = alignment.get("element_stride")
+                    padded_stride = decision.get("element_stride")
+                    elements = 1
+                    sized_dims = 0
+                    for dim, size in sizes.items():
+                        if kinds.get(dim) == "field":
+                            continue
+                        try:
+                            elements *= int(size)
+                            sized_dims += 1
+                        except ValueError:
+                            elements = None
+                            break
+                    if sized_dims and elements and element_stride and padded_stride and padded_stride != element_stride:
+                        before = elements * element_stride
+                        after = elements * padded_stride
+                        percent = (after - before) * 100.0 / before if before else 0.0
+                        print(f"      内存代价: {elements} 格 × {padded_stride - element_stride} 字节补白"
+                              f" = {after - before} 字节（数组 {before} → {after} 字节, +{percent:.1f}%）")
             print()
             continue
 
@@ -237,9 +310,43 @@ def summarize_structs(data_dir):
         # 解析自环的实例归属：同地址重叠是真共享，不同地址是跨实例伪共享。
         dot_file = os.path.join(data_dir, f"graph.{struct_name}.fields.dot")
         true_sharing_fields, cross_instance_fields, unclassified_fields = parse_sharing_edges(dot_file)
+        geometry = parse_array_geometry(dot_file)
+        straddles = False
+        if geometry:
+            line = 64
+            element_size = geometry["element_size"]
+            base_mod = geometry["array_base"] % line
+            stride_mod = element_size % line
+            straddles = base_mod != 0 or stride_mod != 0
+            print(f"🔹 结构体: {color_text(struct_name, '92')}")
+            print(
+                f"   🧭 缓存行几何: element={element_size}B line={line}B "
+                f"array_base={geometry['array_base']} base%line={base_mod} element%line={stride_mod}"
+            )
+            print(
+                f"      同行跨 worker 冲突 (count1 合计) = {geometry['same_line']}; "
+                f"跨行流量 (count2 合计) = {geometry['cross_line']}"
+            )
+            if straddles:
+                print("      → 元素跨缓存行：每个元素被行边界切开，相邻元素共用同一行")
+                line_pairs = geometry.get("line_pairs") or []
+                if line_pairs:
+                    print("      同行冲突按字段对拆开（count1，前 5；同名字段跨实例的部分见下方）：")
+                    for (field_a, field_b), count in line_pairs[:5]:
+                        print(f"         - {field_a} ↔ {field_b}: {count:,} 次")
+                remedies = []
+                if base_mod:
+                    remedies.append(f"把数组 base 对齐到 {line} 字节")
+                if stride_mod:
+                    padded = (element_size + line - 1) // line * line
+                    remedies.append(f"把元素 stride 从 {element_size} 补齐到 {padded} 字节")
+                print(f"   👉 {color_text('优先处方', '93')}: " + "，".join(remedies) + "。")
+                print("      对齐后跨元素同行冲突消失；partial SOA 消不掉这类冲突。\n")
+            else:
+                print("      → 元素独占整行：跨元素不共用缓存行")
+        else:
+            print(f"🔹 结构体: {color_text(struct_name, '92')}")
 
-        print(f"🔹 结构体: {color_text(struct_name, '92')}")
-        
         if true_sharing_fields:
             print(f"   🚨 {color_text('真共享警报', '91')}: 侦测到跨核真共享冲突 (True Sharing)！")
             for ts_field, alpha_val in true_sharing_fields:
@@ -249,7 +356,10 @@ def summarize_structs(data_dir):
             print(f"   ⚠️ {color_text('跨实例伪共享', '93')}: 同一抽象字段的不同实例或成员数组元素发生同行竞争。")
             for field, alpha_val in cross_instance_fields:
                 print(f"      - 字段: {color_text(field, '93')} (跨实例冲突强度 Alpha={alpha_val})")
-            print("   👉 优先处方: partial SOA（将热点字段拆成独立数组）；备选为实例间 padding / thread-partitioned AoS。")
+            if straddles:
+                print("   👉 优先处方: 先把 stride/base 对齐到缓存行；对齐后仍剩下的同元素同行冲突才考虑 partial SOA。")
+            else:
+                print("   👉 优先处方: partial SOA（将热点字段拆成独立数组）；备选为实例间 padding / thread-partitioned AoS。")
             print("      原子操作不能消除这种伪共享，不能作为默认处方。\n")
         if unclassified_fields:
             print("   ⚠️ 旧版 DOT 自环缺少 true_alpha/false_alpha，无法区分真共享与跨实例伪共享；不自动开处方。")
