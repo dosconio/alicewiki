@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -13,11 +13,12 @@ struct Config {
     dbg_viewtype: String,
     disable_self_weight: bool,
     window: u64,
+    cross_object: bool,
 }
 
 fn print_usage_and_exit(prog_name: &str) -> ! {
     eprintln!(
-        "Usage: {} -i <trace.csv> -o <graph.dot> --binary <app> [--cache-line-size <size>] [--dbg-viewtype <path>] [--disable-self-weight] [--window <ns>]",
+        "Usage: {} -i <trace.csv> -o <graph.dot> --binary <app> [--cache-line-size <size>] [--dbg-viewtype <path>] [--disable-self-weight] [--window <ns>] [--cross-object]",
         prog_name
     );
     exit(1);
@@ -37,6 +38,7 @@ fn parse_args() -> Config {
     let mut dbg_viewtype = "dbg-viewtype".to_string();
     let mut disable_self_weight = false;
     let mut window = 0u64;
+    let mut cross_object = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -82,6 +84,8 @@ fn parse_args() -> Config {
             }
         } else if arg == "--disable-self-weight" {
             disable_self_weight = true;
+        } else if arg == "--cross-object" {
+            cross_object = true;
         } else if arg == "--window" {
             if i + 1 < args.len() {
                 window = args[i + 1].parse().unwrap_or(u64::MAX);
@@ -121,6 +125,7 @@ fn parse_args() -> Config {
         dbg_viewtype,
         disable_self_weight,
         window,
+        cross_object,
     }
 }
 
@@ -260,10 +265,36 @@ struct EdgeStat {
     count2: u64,
     count3: u64,
     count4: u64,
+    same1: u64,
+    same2: u64,
+    same3: u64,
+    same4: u64,
     true_alpha: u64,
     false_alpha: u64,
     addr1: u64,
     addr2: u64,
+}
+
+// Two accesses carry the same index list when every bracketed index matches,
+// ignoring the variable name and the member path.  It is the only signal that a
+// cross-struct pair belongs to the same element index.
+fn same_index(left: &str, right: &str) -> bool {
+    fn indices(label: &str) -> impl Iterator<Item = u8> + '_ {
+        let mut inside = false;
+        label.bytes().filter_map(move |byte| match byte {
+            b'[' => {
+                inside = true;
+                Some(byte)
+            }
+            b']' => {
+                inside = false;
+                Some(byte)
+            }
+            _ if inside => Some(byte),
+            _ => None,
+        })
+    }
+    indices(left).eq(indices(right))
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -539,6 +570,7 @@ fn main() {
     let mut warn_limit = 0;
     let mut parsed_accesses = 0u64;
     let mut resolved_accesses = 0u64;
+    let mut node_threads: HashMap<String, BTreeSet<u64>> = HashMap::new();
 
     for line in reader.lines() {
         let line = match line {
@@ -559,6 +591,12 @@ fn main() {
                 node_map
                     .entry(curr_info.label.clone())
                     .or_insert_with(|| curr_info.clone());
+                if config.cross_object {
+                    node_threads
+                        .entry(curr_info.label.clone())
+                        .or_default()
+                        .insert(curr_acc.thread_id);
+                }
 
                 if config.window > 0 {
                     loop {
@@ -595,11 +633,32 @@ fn main() {
 
                     let (bucket, overlaps) =
                         classify_pair(prev_acc, &curr_acc, config.cache_line_size);
+                    let aligned_index = same_index(&prev_info.label, &curr_info.label);
                     match bucket {
-                        1 => stat.count1 += 1,
-                        2 => stat.count2 += 1,
-                        3 => stat.count3 += 1,
-                        _ => stat.count4 += 1,
+                        1 => {
+                            stat.count1 += 1;
+                            if aligned_index {
+                                stat.same1 += 1;
+                            }
+                        }
+                        2 => {
+                            stat.count2 += 1;
+                            if aligned_index {
+                                stat.same2 += 1;
+                            }
+                        }
+                        3 => {
+                            stat.count3 += 1;
+                            if aligned_index {
+                                stat.same3 += 1;
+                            }
+                        }
+                        _ => {
+                            stat.count4 += 1;
+                            if aligned_index {
+                                stat.same4 += 1;
+                            }
+                        }
                     }
                     // False sharing requires the same physical cache line.  A
                     // different-address pair in bucket 2 is cross-line traffic,
@@ -854,14 +913,27 @@ fn main() {
             if info.elem_size > 0 {
                 attributes.push_str(&format!(", elem_size={}", info.elem_size));
             }
-            if group_opt.as_ref().is_some_and(|g| g.ends_with(".fields"))
-                && array_layouts.len() == 1
-            {
-                if let Some((array_base, array_elem)) = array_layouts.iter().next() {
-                    attributes.push_str(&format!(
-                        ", array_base={}, array_elem_size={}",
-                        array_base, array_elem
-                    ));
+            if group_opt.as_ref().is_some_and(|g| g.ends_with(".fields")) {
+                if array_layouts.len() == 1 {
+                    if let Some((array_base, array_elem)) = array_layouts.iter().next() {
+                        attributes.push_str(&format!(
+                            ", array_base={}, array_elem_size={}",
+                            array_base, array_elem
+                        ));
+                    }
+                } else if array_layouts.is_empty() {
+                    // A singleton struct has no element stride; report its own
+                    // size so the geometry diagnosis still has a line width.
+                    if let Some(struct_type) = group_opt
+                        .as_ref()
+                        .and_then(|group| group.strip_suffix(".fields"))
+                        .and_then(|struct_name| types_map.get(struct_name))
+                    {
+                        attributes.push_str(&format!(
+                            ", struct_size={}, instances=1",
+                            struct_type.size
+                        ));
+                    }
                 }
             }
             writeln!(
@@ -891,6 +963,10 @@ fn main() {
                 count2: 0,
                 count3: 0,
                 count4: 0,
+                same1: 0,
+                same2: 0,
+                same3: 0,
+                same4: 0,
                 true_alpha: 0,
                 false_alpha: 0,
             });
@@ -901,6 +977,10 @@ fn main() {
             e.count2 += stat.count2;
             e.count3 += stat.count3;
             e.count4 += stat.count4;
+            e.same1 += stat.same1;
+            e.same2 += stat.same2;
+            e.same3 += stat.same3;
+            e.same4 += stat.same4;
             e.true_alpha += stat.true_alpha;
             e.false_alpha += stat.false_alpha;
         }
@@ -944,6 +1024,269 @@ fn main() {
 
         writeln!(out, "}}").unwrap();
     }
+
+    if config.cross_object {
+        write_cross_object_graph(
+            &config,
+            &node_map,
+            &edge_map,
+            &node_threads,
+            &types_map,
+        );
+    }
+}
+
+#[derive(Default)]
+struct CrossEdgeStat {
+    count1: u64,
+    count2: u64,
+    count3: u64,
+    count4: u64,
+    same1: u64,
+    same2: u64,
+    same3: u64,
+    same4: u64,
+    true_alpha: u64,
+    false_alpha: u64,
+}
+
+fn instance_count(info: &NodeInfo) -> u64 {
+    if info.dims.is_empty() {
+        1
+    } else {
+        info.dims.iter().copied().product::<u64>()
+    }
+}
+
+// A container candidate is a struct field.  Scalar globals are packed by
+// package_simple and never enter cross-container planning.
+fn cross_identity(info: &NodeInfo) -> Option<(String, String)> {
+    let (Some(struct_name), Some(member)) = (info.struct_name.as_ref(), info.member.as_ref())
+    else {
+        return None;
+    };
+    Some((
+        struct_name.clone(),
+        format!("{}::{}", struct_name, member.name),
+    ))
+}
+
+fn describe_member(info: &NodeInfo, types_map: &HashMap<String, StructType>) -> (String, u64, u64) {
+    match info.member.as_ref() {
+        Some(member) => (
+            member.typ.clone(),
+            member.offset,
+            known_size(&member.typ, types_map).unwrap_or(0),
+        ),
+        None => (info.typ.clone(), 0, info.byte_size),
+    }
+}
+
+fn thread_list(set: &BTreeSet<u64>) -> String {
+    set.iter()
+        .map(|tid| tid.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn write_cross_object_graph(
+    config: &Config,
+    node_map: &HashMap<String, NodeInfo>,
+    edge_map: &HashMap<(String, String), EdgeStat>,
+    node_threads: &HashMap<String, BTreeSet<u64>>,
+    types_map: &HashMap<String, StructType>,
+) {
+    let mut edges: BTreeMap<(String, String), CrossEdgeStat> = BTreeMap::new();
+    let mut nodes: BTreeMap<String, (String, u64, u64)> = BTreeMap::new();
+    let mut layouts: BTreeMap<String, BTreeSet<(u64, u64)>> = BTreeMap::new();
+
+    for ((label1, label2), stat) in edge_map {
+        let (Some(info1), Some(info2)) = (node_map.get(label1), node_map.get(label2)) else {
+            continue;
+        };
+        let (Some((owner1, field1)), Some((owner2, field2))) = (
+            cross_identity(info1),
+            cross_identity(info2),
+        ) else {
+            continue;
+        };
+        // Instances of one abstract field are the concern of the geometry pass,
+        // not of cross-container planning.
+        if field1 == field2 {
+            continue;
+        }
+        if owner1 == owner2 {
+            // Keep an intra-owner pair only when its two endpoints are driven by
+            // different threads: that is the split signal.
+            let split_signal = match (node_threads.get(label1), node_threads.get(label2)) {
+                (Some(left), Some(right)) => left != right,
+                _ => false,
+            };
+            if !split_signal {
+                continue;
+            }
+        }
+        let key = if field1 <= field2 {
+            (field1.clone(), field2.clone())
+        } else {
+            (field2.clone(), field1.clone())
+        };
+        let entry = edges.entry(key).or_default();
+        entry.count1 += stat.count1;
+        entry.count2 += stat.count2;
+        entry.count3 += stat.count3;
+        entry.count4 += stat.count4;
+        entry.same1 += stat.same1;
+        entry.same2 += stat.same2;
+        entry.same3 += stat.same3;
+        entry.same4 += stat.same4;
+        entry.true_alpha += stat.true_alpha;
+        entry.false_alpha += stat.false_alpha;
+        nodes
+            .entry(field1)
+            .or_insert_with(|| describe_member(info1, types_map));
+        nodes
+            .entry(field2)
+            .or_insert_with(|| describe_member(info2, types_map));
+        layouts
+            .entry(owner1)
+            .or_default()
+            .insert((info1.elem_size, instance_count(info1)));
+        layouts
+            .entry(owner2)
+            .or_default()
+            .insert((info2.elem_size, instance_count(info2)));
+    }
+
+    if edges.is_empty() {
+        println!("[cross] no cross-object field pair observed; nothing written");
+        return;
+    }
+
+    let mut threads: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
+    for (raw_label, observed) in node_threads {
+        let Some(info) = node_map.get(raw_label) else {
+            continue;
+        };
+        let Some((_, field)) = cross_identity(info) else {
+            continue;
+        };
+        if !nodes.contains_key(&field) {
+            continue;
+        }
+        threads
+            .entry(field)
+            .or_default()
+            .extend(observed.iter().copied());
+    }
+
+    let out_path = std::path::Path::new(&config.output);
+    let parent = out_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""));
+    let stem = out_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_str()
+        .unwrap_or_default();
+    let ext = out_path
+        .extension()
+        .unwrap_or_default()
+        .to_str()
+        .unwrap_or_default();
+    let ext_with_dot = if ext.is_empty() {
+        String::new()
+    } else {
+        format!(".{}", ext)
+    };
+    let mut output_file_path = parent.to_path_buf();
+    output_file_path.push(format!("{}.fields.cross{}", stem, ext_with_dot));
+
+    let mut out = match File::create(&output_file_path) {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!(
+                "Error creating cross-object graph '{}': {}",
+                output_file_path.display(),
+                error
+            );
+            return;
+        }
+    };
+
+    writeln!(out, "graph G {{").unwrap();
+    writeln!(out, "  node [shape=box];\n").unwrap();
+    for (label, (typ, offset, size)) in &nodes {
+        let owner = label.split("::").next().unwrap_or_default();
+        let (stride, instances, ambiguous) = match layouts.get(owner) {
+            Some(set) if set.len() == 1 => {
+                let (stride, instances) = *set.iter().next().unwrap();
+                (stride, instances, 0)
+            }
+            Some(_) => (0, 0, 1),
+            None => (0, 1, 0),
+        };
+        let observed_threads = threads.get(label).map(thread_list).unwrap_or_default();
+        let struct_size = types_map.get(owner).map(|st| st.size).unwrap_or(0);
+        writeln!(
+            out,
+            "  \"{}\" [label=\"{}\", owner=\"{}\", type=\"{}\", offset={}, size={}, element_stride={}, instances={}, struct_size={}, layout_ambiguous={}, threads=\"{}\"];",
+            escape_dot_string(label),
+            escape_dot_string(label),
+            escape_dot_string(owner),
+            escape_dot_string(typ),
+            offset,
+            size,
+            stride,
+            instances,
+            struct_size,
+            ambiguous,
+            observed_threads
+        )
+        .unwrap();
+    }
+    writeln!(out).unwrap();
+
+    for ((label1, label2), stat) in &edges {
+        let alpha = stat.count1 + stat.count2;
+        let beta = stat.count3 + stat.count4;
+        let alpha_kind = match (stat.count1 > 0, stat.count2 > 0) {
+            (true, true) => "mixed",
+            (true, false) => "1",
+            (false, true) => "2",
+            (false, false) => "none",
+        };
+        writeln!(
+            out,
+            "  \"{}\" -- \"{}\" [",
+            escape_dot_string(label1),
+            escape_dot_string(label2)
+        )
+        .unwrap();
+        writeln!(out, "    label=\"({},{})\",", alpha, beta).unwrap();
+        writeln!(out, "    alpha={},", alpha).unwrap();
+        writeln!(out, "    beta={},", beta).unwrap();
+        writeln!(out, "    count1={},", stat.count1).unwrap();
+        writeln!(out, "    count2={},", stat.count2).unwrap();
+        writeln!(out, "    count3={},", stat.count3).unwrap();
+        writeln!(out, "    count4={},", stat.count4).unwrap();
+        writeln!(out, "    count1_same={},", stat.same1).unwrap();
+        writeln!(out, "    count2_same={},", stat.same2).unwrap();
+        writeln!(out, "    count3_same={},", stat.same3).unwrap();
+        writeln!(out, "    count4_same={},", stat.same4).unwrap();
+        writeln!(out, "    true_alpha={},", stat.true_alpha).unwrap();
+        writeln!(out, "    false_alpha={},", stat.false_alpha).unwrap();
+        writeln!(out, "    alpha_kind=\"{}\"", alpha_kind).unwrap();
+        writeln!(out, "  ];").unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+
+    println!(
+        "[cross] {}: {} fields, {} cross-object edges",
+        output_file_path.display(),
+        nodes.len(),
+        edges.len()
+    );
 }
 
 #[cfg(test)]

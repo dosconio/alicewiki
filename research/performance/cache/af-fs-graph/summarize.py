@@ -38,14 +38,21 @@ def parse_sharing_edges(dot_file):
     return true_sharing_fields, cross_instance_fields, unclassified_fields
 
 def parse_array_geometry(dot_file):
-    """Return element size, array base and same/cross line pair counts."""
+    """Return element geometry and same/cross line pair counts, or None."""
     if not os.path.exists(dot_file):
         return None
     with open(dot_file, 'r', encoding='utf-8') as f:
         content = f.read()
     base_match = re.search(r'array_base=(\d+)', content)
     elem_match = re.search(r'array_elem_size=(\d+)', content)
-    if not base_match or not elem_match:
+    struct_match = re.search(r'struct_size=(\d+)', content)
+    singleton = False
+    if elem_match:
+        element_size = int(elem_match.group(1))
+    elif struct_match:
+        element_size = int(struct_match.group(1))
+        singleton = True
+    else:
         return None
     same_line = sum(int(v) for v in re.findall(r'count1=(\d+)', content))
     cross_line = sum(int(v) for v in re.findall(r'count2=(\d+)', content))
@@ -64,8 +71,9 @@ def parse_array_geometry(dot_file):
         key = tuple(sorted((field_a, field_b)))
         pair_counts[key] = pair_counts.get(key, 0) + count
     return {
-        "array_base": int(base_match.group(1)),
-        "element_size": int(elem_match.group(1)),
+        "array_base": int(base_match.group(1)) if base_match else None,
+        "element_size": element_size,
+        "singleton": singleton,
         "same_line": same_line,
         "cross_line": cross_line,
         "line_pairs": sorted(pair_counts.items(), key=lambda item: -item[1]),
@@ -312,22 +320,51 @@ def summarize_structs(data_dir):
         true_sharing_fields, cross_instance_fields, unclassified_fields = parse_sharing_edges(dot_file)
         geometry = parse_array_geometry(dot_file)
         straddles = False
+        split_needed = False
         if geometry:
+            split_needed = geometry["singleton"] and geometry["same_line"] > 0
             line = 64
             element_size = geometry["element_size"]
-            base_mod = geometry["array_base"] % line
+            array_base = geometry["array_base"]
+            base_mod = None if array_base is None else array_base % line
             stride_mod = element_size % line
-            straddles = base_mod != 0 or stride_mod != 0
+            straddles = (base_mod not in (None, 0)) or stride_mod != 0
+            conflicts = geometry["same_line"] + geometry["cross_line"]
             print(f"🔹 结构体: {color_text(struct_name, '92')}")
-            print(
-                f"   🧭 缓存行几何: element={element_size}B line={line}B "
-                f"array_base={geometry['array_base']} base%line={base_mod} element%line={stride_mod}"
-            )
+            if array_base is None:
+                print(
+                    f"   🧭 缓存行几何: 单实例 element={element_size}B line={line}B "
+                    f"（无数组，无元素步长）"
+                )
+            else:
+                print(
+                    f"   🧭 缓存行几何: element={element_size}B line={line}B "
+                    f"array_base={array_base} base%line={base_mod} element%line={stride_mod}"
+                )
             print(
                 f"      同行跨 worker 冲突 (count1 合计) = {geometry['same_line']}; "
                 f"跨行流量 (count2 合计) = {geometry['cross_line']}"
             )
-            if straddles:
+            if geometry["singleton"]:
+                if geometry["same_line"]:
+                    print(
+                        f"      → 单实例：{geometry['same_line']:,} 次同行跨 worker 冲突"
+                        f"全部发生在同一个实例内部（字段分属不同线程）"
+                    )
+                    line_pairs = geometry.get("line_pairs") or []
+                    if line_pairs:
+                        print("      冲突字段对（count1，前 5）：")
+                        for (field_a, field_b), count in line_pairs[:5]:
+                            print(f"         - {field_a} ↔ {field_b}: {count:,} 次")
+                    print("   👉 处方: 按线程把字段拆到不同缓存行；这一项的 stride/base 对齐无效，"
+                          "见“结构体间字段重排建议”。\n")
+                else:
+                    print("      → 单实例：未观测到同行跨 worker 冲突")
+            elif not straddles:
+                print("      → 元素独占整行：跨元素不共用缓存行")
+            elif not conflicts:
+                print("      → 元素跨缓存行，但本算例未观测到同行冲突：不改几何")
+            else:
                 print("      → 元素跨缓存行：每个元素被行边界切开，相邻元素共用同一行")
                 line_pairs = geometry.get("line_pairs") or []
                 if line_pairs:
@@ -340,10 +377,11 @@ def summarize_structs(data_dir):
                 if stride_mod:
                     padded = (element_size + line - 1) // line * line
                     remedies.append(f"把元素 stride 从 {element_size} 补齐到 {padded} 字节")
-                print(f"   👉 {color_text('优先处方', '93')}: " + "，".join(remedies) + "。")
-                print("      对齐后跨元素同行冲突消失；partial SOA 消不掉这类冲突。\n")
-            else:
-                print("      → 元素独占整行：跨元素不共用缓存行")
+                if remedies:
+                    print(f"   👉 {color_text('优先处方', '93')}: " + "，".join(remedies) + "。")
+                    print("      对齐后跨元素同行冲突消失；partial SOA 消不掉这类冲突。\n")
+                else:
+                    print("      → 几何本身无可改：冲突来自单实例内部或跨元素密度，看下面的处方。\n")
         else:
             print(f"🔹 结构体: {color_text(struct_name, '92')}")
 
@@ -371,7 +409,11 @@ def summarize_structs(data_dir):
                 print(f"      [{recommended_headers[i]}]: " + " | ".join(group))
         else:
             if original == flat_recommended:
-                print("   ✅ 诊断: 推荐字段顺序与当前相同；仍需按推荐 offset/padding 检查缓存行隔离。")
+                if split_needed:
+                    print("   ⚠️ 诊断: 字段顺序无需变动；但同一实例内的字段分属不同线程，"
+                          "需要在结构体之间拆开（见“结构体间字段重排建议”）。")
+                else:
+                    print("   ✅ 诊断: 推荐字段顺序与当前相同；仍需按推荐 offset/padding 检查缓存行隔离。")
                 print("   [维持现有布局]: " + " -> ".join(original))
                 for i, group in enumerate(recommended_groups):
                     print(f"      [{recommended_headers[i]}]: " + " | ".join(group))
@@ -391,6 +433,101 @@ def summarize_structs(data_dir):
                             colored_group.append(color_text(f"{field}(*)", "93")) # 移动了位置，标黄+星号
                     print(f"      📦 {recommended_headers[i]}: " + " | ".join(colored_group))
         print()
+
+def summarize_cross_struct(data_dir):
+    print("="*60)
+    print("🔀 结构体间字段重排建议 (Cross-Struct Repacking)")
+    print("="*60)
+    plan_files = glob.glob(os.path.join(data_dir, "graph.*.plan.json"))
+    if not plan_files:
+        print("  未检测到跨结构体规划结果（需要 generator --cross-object 与 planner）。\n")
+        return
+
+    for filepath in sorted(plan_files):
+        try:
+            with open(filepath, 'r', encoding='utf-8') as handle:
+                plan = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"  ❌ 无法解析 {os.path.basename(filepath)}: {error}\n")
+            continue
+
+        label = os.path.basename(filepath).replace(".plan.json", "")
+        if label.startswith("graph."):
+            label = label[len("graph."):]
+        label = label.replace("fields.cross", "cross-struct")
+        print(f"🔹 规划对象: {color_text(label, '92')}")
+        baseline = plan.get("current_score", 0.0)
+        final = plan.get("final_score", 0.0)
+        gain = plan.get("gain", final - baseline)
+        print(f"   得分: {baseline:.1f} → {final:.1f} （增益 {gain:.1f}，lambda={plan.get('lambda', 0.0):.1f}）")
+        before_bytes = plan.get("footprint_before")
+        after_bytes = plan.get("footprint_after")
+        if before_bytes is not None and after_bytes is not None:
+            line = plan.get("line", 64)
+            delta = after_bytes - before_bytes
+            percent = delta * 100.0 / before_bytes if before_bytes else 0.0
+            print(f"   占用: {before_bytes} 字节 / {before_bytes // line} 行 → "
+                  f"{after_bytes} 字节 / {after_bytes // line} 行（{delta:+d} 字节, {percent:+.1f}%）")
+
+        actions = plan.get("actions", [])
+        if not actions:
+            print("   ✅ 诊断: 没有正增益动作，维持现状的跨结构体布局。\n")
+            continue
+
+        labels = {"merge": "合并", "migrate": "迁移", "split": "分裂"}
+        for action in actions:
+            kind = labels.get(action.get("action"), action.get("action"))
+            fields = " | ".join(action.get("fields", []))
+            print(f"   👉 {color_text(kind, '93')} → {action.get('container')}: {fields}")
+            print(f"      实例 {action.get('instances')}，{action.get('bytes')} 字节 / {action.get('lines')} 行，"
+                  f"得分 {action.get('score_before'):.1f} → {action.get('score_after'):.1f}")
+            groups = action.get("groups") or []
+            if groups:
+                for index, group in enumerate(groups, 1):
+                    print(f"      组 {index}: " + " | ".join(group))
+            if action.get("strict_thread_superset"):
+                print("      注意: 线程集合由子集扩到超集，已计入寻址惩罚")
+
+        rejected = plan.get("rejected", [])
+        if rejected:
+            print("   ⚠️ 被拒候选（原因: 次数）:")
+            for item in rejected[:5]:
+                print(f"      - {item.get('fields')}: {item.get('reason')} ×{item.get('count')}")
+        print()
+
+
+def summarize_verdicts(data_dir):
+    print("="*60)
+    print("🧾 结论汇总（优先级仲裁）")
+    print("="*60)
+    actions = []
+    for filepath in sorted(glob.glob(os.path.join(data_dir, "graph.*.plan.json"))):
+        try:
+            with open(filepath, 'r', encoding='utf-8') as handle:
+                actions.extend(json.load(handle).get("actions", []))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+    if not actions:
+        print("   没有跨结构体动作，按数组节与结构体节的建议执行。\n")
+        return
+
+    print("   优先级: 跨结构体动作 > 缓存行几何（对齐/stride）> 字段顺序 > 轴置换")
+    owners = []
+    for action in actions:
+        kind = {"merge": "合并", "migrate": "迁移", "split": "分裂"}.get(
+            action.get("action"), action.get("action"))
+        fields = " | ".join(action.get("fields", []))
+        print(f"   1) {kind}: {fields} → 容器 {action.get('container')}")
+        for field in action.get("fields", []):
+            owner = field.split("::")[0]
+            if owner and owner not in owners:
+                owners.append(owner)
+    if owners:
+        print(f"   ⚠️ 涉及的 {', '.join(owners)} 的几何/字段顺序建议降为备选："
+              "先按上面的动作调整结构，再评估是否仍需 stride 补齐。")
+    print()
+
 
 def summarize_globals(data_dir):
     print("="*60)
@@ -429,4 +566,6 @@ if __name__ == "__main__":
     print(f"\n🚀 正在分析数据目录: {target_dir}\n")
     summarize_arrays(target_dir)
     summarize_structs(target_dir)
+    summarize_cross_struct(target_dir)
     summarize_globals(target_dir)
+    summarize_verdicts(target_dir)

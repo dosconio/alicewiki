@@ -4,8 +4,15 @@ affspath = $(awiki_path)/research/performance/cache/af-fs-graph
 PASS_SO ?= $(affspath)/field_analysis/build/FieldAnalysis.so
 RUNTIME_LIB ?= $(affspath)/field_analysis/build/runtime/libaffinity.a
 DBG_VIEWTYPE ?= dbg-viewtype
+# Keep clang/opt/llvm-link on ONE LLVM installation; a newer clang emits
+# debug metadata that an older llvm-link rejects.
+LLVM_PREFIX ?=
+CC ?= $(LLVM_PREFIX)clang
+CXX ?= $(LLVM_PREFIX)clang++
+OPT ?= $(LLVM_PREFIX)opt
+LLVM_LINK ?= $(LLVM_PREFIX)llvm-link
 
-SRCS ?= $(wildcard *.cpp)
+SRCS ?= $(wildcard *.cpp *.c)
 BIN ?= t.exe
 TRACE ?= trace.csv
 TAU ?= 30000
@@ -16,7 +23,7 @@ GAMMA ?= 10
 LINE ?= 64
 PARAMS = $(K) $(G) $(GAMMA) $(LINE)
 
-TU_LL = $(SRCS:.cpp=.ll)
+TU_LL = $(patsubst %.cpp,%.ll,$(patsubst %.c,%.ll,$(SRCS)))
 
 TAG ?= $(shell date +%Y%m%d-%H%M%S)
 REPORTDIR ?= reports
@@ -27,25 +34,28 @@ REPORT = $(REPORTDIR)/$(TAG).txt
 all: $(BIN)
 
 $(BIN): targ.ll
-	clang++ targ.ll $(RUNTIME_LIB) -lpthread -static -g -gdwarf-4 -o $(BIN)
+	$(CXX) -std=c++20 targ.ll $(RUNTIME_LIB) -lpthread -static -g -gdwarf-4 -o $(BIN)
 	rm *json
 
 targ.ll: tsin.ll
-	opt -load-pass-plugin=$(PASS_SO) -passes="field-analysis" $< -S -o $@
+	$(OPT) -load-pass-plugin=$(PASS_SO) -passes="field-analysis" $< -S -o $@
 
 tsin.ll: $(TU_LL)
-	@if [ -z "$(strip $(TU_LL))" ]; then echo "✖ 当前目录没有 .cpp, 请用 make SRCS=xxx.cpp 指定"; exit 1; fi; \
+	@if [ -z "$(strip $(TU_LL))" ]; then echo "✖ 当前目录没有 .cpp/.c, 请用 make SRCS=test_fields3.c 指定"; exit 1; fi; \
 	n=$$(grep -l '^define .* @main(' $(TU_LL) 2>/dev/null | wc -l); \
 	if [ "$$n" -gt 1 ]; then \
 		echo "✖ 检出 $$n 个定义 main() 的源文件, 它们不是同一程序的多个 TU:"; \
 		grep -l '^define .* @main(' $(TU_LL) | tr '\n' ' '; echo; \
-		echo "  请显式指定其中一个, 例如:  make SRCS=test_fields2.cpp"; \
+		echo "  请显式指定其中一个, 例如:  make SRCS=test_fields2.cpp 或 make SRCS=test_fields3.c"; \
 		exit 1; \
 	fi
-	llvm-link $(TU_LL) -S -o $@
+	$(LLVM_LINK) $(TU_LL) -S -o $@
 
 %.ll: %.cpp
-	clang++ -O0 -g -S -emit-llvm -gdwarf-4 $< -o $@
+	$(CXX) -std=c++20 -O0 -g -S -emit-llvm -gdwarf-4 $< -o $@
+
+%.ll: %.c
+	$(CC) -std=c11 -O0 -g -S -emit-llvm -gdwarf-4 $< -o $@
 
 $(TRACE): $(BIN)
 	-mkdir csv
@@ -57,13 +67,15 @@ $(TRACE): $(BIN)
 run: $(TRACE)
 
 opt: $(TRACE) $(BIN)
-	rm -rf *.dot *.txt *.layout.txt *.decision.json
-	$(affspath)/generator/target/debug/generator -i $(TRACE) -o graph.dot --binary $(BIN) --dbg-viewtype $(DBG_VIEWTYPE) --window $(TAU)
+	rm -rf *.dot *.txt *.layout.txt *.decision.json *.plan.json
+	$(affspath)/generator/target/debug/generator -i $(TRACE) -o graph.dot --binary $(BIN) --dbg-viewtype $(DBG_VIEWTYPE) --window $(TAU) --cross-object
 	@for file in graph.*.dot; do \
 		case "$$file" in \
 			*.fields.dot) \
 				echo "👉 [Struct Packing] $$file ..."; \
 				$(affspath)/package_fields/target/debug/package_fields "$$file" $(PARAMS); \
+				;; \
+			*.fields.cross.dot) \
 				;; \
 			graph.dot) \
 				;; \
@@ -73,6 +85,10 @@ opt: $(TRACE) $(BIN)
 				;; \
 		esac; \
 	done
+	@if [ -f graph.fields.cross.dot ]; then \
+		echo "CROSS Planning graph.fields.cross.dot ..."; \
+		$(affspath)/planner/target/debug/planner graph.fields.cross.dot $(PARAMS); \
+	fi
 	@if [ -f graph.dot ]; then \
 		echo "👉 [Globals Packing] graph.dot ..."; \
 		$(affspath)/package_simple/target/debug/package_simple graph.dot $(PARAMS); \
