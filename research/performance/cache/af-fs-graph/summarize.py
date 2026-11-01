@@ -171,6 +171,15 @@ def summarize_arrays(data_dir):
             elif action == "partial_soa":
                 field = decision.get("selected_field") or "<unknown>"
                 print(f"   💡 结构化判决: partial SOA，将热点字段 {field} 拆成独立数组。")
+            elif action == "conflict_only":
+                print("   ⚠️ 诊断: 存在同行跨 worker 写（误共享），且该数组的冲突项主导（平均权重为负）。")
+                print("      成因是不同线程交错访问同一缓存行内的不同元素，不是轴顺序问题："
+                      "轴置换 / 实例 padding / partial SOA 都对它无效。")
+                print("   👉 请自行检查:")
+                print("      1) 每个元素是否只被一个线程访问（写者唯一、无跨线程读写依赖）")
+                print("      2) 各线程访问的元素范围是否相互重叠")
+                print("      3) 若 1、2 成立，可考虑按线程把元素集中存放（各组起点按缓存行对齐），"
+                      "并实测收益；本工具不生成具体映射")
             elif action == "insufficient_evidence":
                 print("   ⚠️ 结构化判决: 证据不足，不修改布局。")
             else:

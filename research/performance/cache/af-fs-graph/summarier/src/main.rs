@@ -718,6 +718,26 @@ fn main() {
         }
     }
 
+    let same_line_conflicts: u64 = edges
+        .iter()
+        .filter(|e| nodes.contains_key(&e.u) && nodes.contains_key(&e.v))
+        .map(|e| e.same_line)
+        .sum();
+    let cross_line_conflicts: u64 = edges
+        .iter()
+        .filter(|e| nodes.contains_key(&e.u) && nodes.contains_key(&e.v))
+        .map(|e| e.cross_line)
+        .sum();
+    // A one-dimensional array has no applicable layout candidate: axis
+    // permutation is meaningless, instance padding needs a struct stride, and
+    // there is no field to split.  When same-line cross-worker writes exist and
+    // they dominate the score, "keep" would be a misleading verdict, so report
+    // the conflict instead.  Cross-line traffic is not required to be smaller:
+    // strided threads normally produce far more of it.
+    let conflict_dominates =
+        same_line_conflicts > 0 && !w_sums.is_empty() && w_sums[0] < 0.0;
+    let report_conflict_only = array_dims == 1 && !is_struct_array && conflict_dominates;
+
     let current_index = candidates.iter().position(|c| c.action == "keep").unwrap();
     let current_score = candidates[current_index].score;
     let best_index = candidates
@@ -747,6 +767,14 @@ fn main() {
             "full-graph candidate re-evaluation found a positive improvement",
         )
     };
+    let (action, reason) = if report_conflict_only && action == "keep" {
+        (
+            "conflict_only",
+            "same-line cross-worker traffic dominates and no layout candidate applies",
+        )
+    } else {
+        (action, reason)
+    };
     let array_base_address = nodes.values().map(|n| n.base_address).min().unwrap_or(0);
     let base_mod_line = if memoryline > 0 {
         array_base_address % memoryline
@@ -763,16 +791,6 @@ fn main() {
     } else {
         0
     };
-    let same_line_conflicts: u64 = edges
-        .iter()
-        .filter(|e| nodes.contains_key(&e.u) && nodes.contains_key(&e.v))
-        .map(|e| e.same_line)
-        .sum();
-    let cross_line_conflicts: u64 = edges
-        .iter()
-        .filter(|e| nodes.contains_key(&e.u) && nodes.contains_key(&e.v))
-        .map(|e| e.cross_line)
-        .sum();
     let mut alignment_remedies: Vec<String> = Vec::new();
     if is_struct_array && stride_mod_line != 0 {
         alignment_remedies.push(format!(
