@@ -16,6 +16,8 @@
 #include "SDRAM.hpp"
 using namespace uni;
 
+OstreamTrait* con0_out = 0;
+
 #define LCD_FRAME_BUF_ADDR FMC_SDRAM_BANK1_BASE
 
 // ---- LTDC 引脚：LTDC 信号全部 AF14，背光 PB5 ----

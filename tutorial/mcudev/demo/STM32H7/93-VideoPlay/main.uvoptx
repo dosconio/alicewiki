@@ -316,7 +316,7 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\..\..\..\..\..\unisym\lib\cpp\fileformat\video\AVI.cpp</PathWithFileName>
+      <PathWithFileName>..\..\..\..\..\..\unisym\lib\cpp\Format\Video\AVI.cpp</PathWithFileName>
       <FilenameWithoutPath>AVI.cpp</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>

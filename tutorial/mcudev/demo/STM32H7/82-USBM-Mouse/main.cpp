@@ -198,7 +198,7 @@ static const uint16 cur_shape[CUR_H] = {
 static uint16* const cur_sprite = (uint16*)(SDRAM_BANK1_BASE + LCD_W * LCD_H * 2);
 static int32 cur_x = (LCD_W - CUR_W) / 2, cur_y = (LCD_H - CUR_H) / 2;
 // 位移队列：中断里入队、主循环出队，按屏坐标夹取，绕不过边界
-static volatile int8 cur_dq_x[32] = {}, cur_dq_y[32] = {};
+static volatile stdsint cur_dq_x[32] = {}, cur_dq_y[32] = {};
 static volatile uint32 cur_dq_cnt = 0;
 
 // 预生成 16x16 贴图：白心 + 黑边，其余 A=0 全透明
@@ -263,17 +263,17 @@ static void cursor_reset() {
 }
 
 // 中断里只记录，打印放在主循环
-static void on_mouse_report(MouseMessage m) {
+static void on_mouse_report(MouseGeneralMessage m) {
 	mouse_report_cnt++;
-	mouse_last[0] = (byte)((m.BtnLeft ? 1 : 0) | (m.BtnRight ? 2 : 0) | (m.BtnMiddle ? 4 : 0));
-	mouse_last[1] = (byte)m.X;
-	mouse_last[2] = (byte)m.Y;
-	mouse_x += m.X;
-	mouse_y += m.Y;
+	mouse_last[0] = (byte)((m.btn_left ? 1 : 0) | (m.btn_right ? 2 : 0) | (m.btn_middle ? 4 : 0));
+	mouse_last[1] = (byte)m.movement.x;
+	mouse_last[2] = (byte)m.movement.y;
+	mouse_x += m.movement.x;
+	mouse_y += m.movement.y;
 	// 位移入队，主循环出队后按屏坐标夹取
 	const uint32 qi = cur_dq_cnt++ & 31;
-	cur_dq_x[qi] = m.X;
-	cur_dq_y[qi] = m.Y;
+	cur_dq_x[qi] = m.movement.x;
+	cur_dq_y[qi] = m.movement.y;
 	// 只在按下沿计数，按住不放不会一直加
 	for (byte i = 0; i < 3; i++) {
 		const byte bit = (byte)(1u << i);
@@ -938,4 +938,3 @@ int main() {
 	}
 }
 
-OstreamTrait* con0_out = 0;
