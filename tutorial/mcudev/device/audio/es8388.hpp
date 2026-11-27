@@ -1,4 +1,4 @@
-// ASCII CPP-ISO11 TAB4 CRLF
+// UTF-8 CPP-ISO11 TAB4 CRLF
 // Docutitle: (Device/Audio) ES8388 Audio Codec Driver
 // Codifiers: @dosconio: 2026xxxx~;
 // Attribute: Arn-Covenant Any-Architect Env-Freestanding Non-Dependence
@@ -98,6 +98,38 @@ public:
 		fmt &= 0x03;
 		len &= 0x07;
 		Send(0x17, (fmt << 1) | (len << 3));
+	}
+
+	/* ES8388 数据手册第 6.2 节：ADC 串口格式独立于 DAC，data_select 对应 DATSEL。 */
+	bool SetADCFormat(I2SFormat fmt, I2SLength len, byte data_select = 0) {
+		if ((byte)fmt > (byte)I2SFormat::PCM || (byte)len > (byte)I2SLength::Bit32 ||
+			data_select > 3) return false;
+		return Send(0x0C, (data_select << 6) | ((byte)len << 2) | (byte)fmt);
+	}
+
+	// input=0 选择 LIN1/RIN1，input=1 选择 LIN2/RIN2，关闭模拟混合并使能 ASDOUT。
+	bool SetInput(byte input) {
+		if (input > 1) return false;
+		byte select = Read(0x0A);
+		if (iic.getError() != ERR_IIC_NONE) return false;
+		if (!Send(0x0A, (select & 0x0F) | (input ? 0x50 : 0x00))) return false;
+		byte control = Read(0x0B);
+		if (iic.getError() != ERR_IIC_NONE) return false;
+		return Send(0x0B, control & ~0x1C);// 关闭模拟单声道混合及 ASDOUT 三态。
+	}
+
+	// ES8388 数据手册第 6.1.4 节，MICBIAS 的关闭位为 bit3。
+	bool SetMicBias(bool enabled) {
+		byte power = Read(0x03);
+		if (iic.getError() != ERR_IIC_NONE) return false;
+		return Send(0x03, enabled ? power & ~0x08 : power | 0x08);
+	}
+
+	// 仅控制模拟输入和 ADC 电源，数字时钟及参考电源仍由 SetADDA 控制。
+	bool SetADCEnabled(bool enabled) {
+		byte power = Read(0x03);
+		if (iic.getError() != ERR_IIC_NONE) return false;
+		return Send(0x03, enabled ? power & 0x0F : power | 0xF0);
 	}
 
 	void SetHPVol(byte volume) {

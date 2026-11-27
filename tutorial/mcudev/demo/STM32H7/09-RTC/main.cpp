@@ -83,7 +83,7 @@ int main() {
 
 	// ---- RTC：LSE 时钟源，24 小时制 ----
 	RTC.enClock(RTCClockSource::LSE);
-	RTC.init(RTCHourFormat::Hour24, 0x7F, 0xFF);
+	RTC.setMode(RTCHourFormat::Hour24, 0x7F, 0xFF);
 	if (RTC.bkupRead(0) != 0x5050) {// 首次配置（备份寄存器标记），设置初始时间日期
 		datime_t t = {};
 		t.hour = 10; t.minute = 50; t.second = 0;

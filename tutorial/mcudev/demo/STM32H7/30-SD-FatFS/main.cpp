@@ -42,13 +42,17 @@ namespace {
 	static byte* heap_cursor = heap_pool;
 	static byte* heap_limit  = heap_pool + (1024U * 1024U);
 }
-static void* heap_alloc(size_t size) {
-	size = (size + 15U) & ~(size_t)15U;// 16 字节对齐
-	if (heap_cursor + size > heap_limit) {
+static void* heap_alloc(size_t size, size_t alignment = 16) {
+	if (alignment < 16) alignment = 16;
+	const size_t cursor = (size_t)heap_cursor;
+	const size_t remaining = (size_t)(heap_limit - heap_cursor);
+	const size_t padding = (alignment - (cursor & (alignment - 1))) & (alignment - 1);
+	if (!size) size = 1;
+	if (padding > remaining || size > remaining - padding) {
 		while (1) { }// 堆耗尽，停机
 	}
-	void* p = heap_cursor;
-	heap_cursor += size;
+	void* p = heap_cursor + padding;
+	heap_cursor += padding + size;
 	return p;
 }
 void* operator new(size_t size)              { return heap_alloc(size); }
@@ -57,6 +61,18 @@ void  operator delete(void* p)        noexcept { (void)p; }
 void  operator delete[](void* p)      noexcept { (void)p; }
 void  operator delete(void* p, size_t) noexcept { (void)p; }
 void  operator delete[](void* p, size_t) noexcept { (void)p; }
+
+// 对齐分配也使用 SDRAM 简单堆；与普通分配一样，本例程不回收内存。
+void* operator new(size_t size, std::align_val_t alignment) {
+	return heap_alloc(size, (size_t)alignment);
+}
+void* operator new[](size_t size, std::align_val_t alignment) {
+	return heap_alloc(size, (size_t)alignment);
+}
+void  operator delete(void* p, std::align_val_t) noexcept { (void)p; }
+void  operator delete[](void* p, std::align_val_t) noexcept { (void)p; }
+void  operator delete(void* p, size_t, std::align_val_t) noexcept { (void)p; }
+void  operator delete[](void* p, size_t, std::align_val_t) noexcept { (void)p; }
 
 // FilesysFAT 的缓冲全部放到外部 SDRAM（SDRAM_BANK1_BASE，0xC0000000）
 static byte* sector_buf = (byte*)SDRAM_BANK1_BASE;      // 扇区缓冲（512B）
@@ -108,9 +124,16 @@ int main() {
 	}
 	XART1.OutFormat("FAT%u mounted OK\r\n", (unsigned)fs.fat_type);
 
-	// 删除旧文件（忽略结果），再创建新文件
-	fs.remove("/TEST.TXT");
-	if (!fs.create("/TEST.TXT", 0, nullptr)) {
+	// 文件不存在时删除可以失败；同时显示是否已进入禁止写入状态。
+	bool removed = fs.remove("/TEST.TXT");
+	XART1.OutFormat("remove=%u, FAT=%u, fault=%u\r\n",
+		(unsigned)removed, (unsigned)fs.error_number, (unsigned)fs.getFaultState());
+	FilesysCreateParameter fcp;
+	bool created = fs.create("/TEST.TXT", 0, fcp);
+	XART1.OutFormat("create=%u, FAT=%u, fault=%u, heap=%u/1048576\r\n",
+		(unsigned)created, (unsigned)fs.error_number, (unsigned)fs.getFaultState(),
+		(unsigned)(heap_cursor - heap_pool));
+	if (!created) {
 		XART1.OutFormat("create FAIL\r\n");
 		while (1) { SysDelay_ms(1000); }
 	}
@@ -137,7 +160,7 @@ int main() {
 
 	while (1) { SysDelay_ms(1000); }
 }
-
+stduint con0_out;
 void erro(const char* str) {
 	LEDR.setMode(GPIOMode::OUT);
 	while (true) {

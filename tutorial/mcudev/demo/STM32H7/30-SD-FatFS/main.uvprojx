@@ -339,7 +339,7 @@
             <v6Rtti>0</v6Rtti>
             <VariousControls>
               <MiscControls>-fno-strict-aliasing -Wno-c++98-compat -Wno-old-style-cast -Wno-c++98-c++11-compat-binary-literal -Wno-extra-semi-stmt -Wno-deprecated-copy-with-user-provided-copy -Wno-c++98-compat-pedantic -Wno-keyword-macro -Wno-invalid-constexpr -Wno-empty-body</MiscControls>
-              <Define>_MCU_STM32H7x</Define>
+              <Define>_MCU_STM32H7x, _MCCA</Define>
               <Undefine></Undefine>
               <IncludePath>D:\her\unisym\inc</IncludePath>
             </VariousControls>
